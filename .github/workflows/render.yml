@@ -1,0 +1,73 @@
+name: Render AI Video
+
+on:
+  workflow_dispatch:
+    inputs:
+      video_url:
+        description: "Pexels video URL"
+        required: true
+        type: string
+      script_text:
+        description: "Voice script"
+        required: true
+        type: string
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install free TTS
+        run: |
+          pip install edge-tts
+
+      - name: Download video
+        env:
+          VIDEO_URL: ${{ inputs.video_url }}
+        run: |
+          curl -L --fail "$VIDEO_URL" -o input.mp4
+
+      - name: Generate voice
+        env:
+          SCRIPT_TEXT: ${{ inputs.script_text }}
+        run: |
+          python - <<'PY'
+          import os
+          import asyncio
+          import edge_tts
+
+          async def main():
+              text = os.environ["SCRIPT_TEXT"]
+              voice = "en-US-GuyNeural"
+              communicate = edge_tts.Communicate(text, voice)
+              await communicate.save("voice.mp3")
+
+          asyncio.run(main())
+          PY
+
+      - name: Render vertical video
+        run: |
+          ffmpeg \
+            -stream_loop -1 \
+            -i input.mp4 \
+            -i voice.mp3 \
+            -shortest \
+            -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920" \
+            -c:v libx264 \
+            -preset veryfast \
+            -crf 23 \
+            -c:a aac \
+            -b:a 128k \
+            -movflags +faststart \
+            final.mp4
+
+      - name: Upload final video
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-video
+          path: final.mp4
