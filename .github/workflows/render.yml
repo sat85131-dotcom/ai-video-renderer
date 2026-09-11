@@ -13,58 +13,163 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Install FFmpeg
+      - name: Install tools
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
+          python3 -m pip install edge-tts
 
-      - name: Install free TTS
-        run: |
-          pip install edge-tts
-
-      - name: Download video
+      - name: Save scenes JSON
         env:
-          VIDEO_URL: ${{ inputs.video_url }}
+          SCENES_JSON: ${{ inputs.scenes_json }}
         run: |
-          curl -L --fail "$VIDEO_URL" -o input.mp4
+          printf '%s' "$SCENES_JSON" > scenes.json
+          python3 -m json.tool scenes.json
 
-      - name: Generate voice
-        env:
-          SCRIPT_TEXT: ${{ inputs.script_text }}
+      - name: Render all scenes
         run: |
-          python - <<'PY'
+          python3 <<'PY'
+          import json
           import os
+          import subprocess
           import asyncio
           import edge_tts
 
-          async def main():
-              text = os.environ["SCRIPT_TEXT"]
-              voice = "en-US-GuyNeural"
-              communicate = edge_tts.Communicate(text, voice)
-              await communicate.save("voice.mp3")
+          with open("scenes.json", "r", encoding="utf-8") as f:
+              scenes = json.load(f)
 
-          asyncio.run(main())
+          os.makedirs("segments", exist_ok=True)
+
+          async def make_voice(text, output):
+              voice = "en-US-GuyNeural"
+              communicate = edge_tts.Communicate(
+                  text=text,
+                  voice=voice
+              )
+              await communicate.save(output)
+
+          segment_files = []
+
+          for i, scene in enumerate(scenes, start=1):
+              number = str(i).zfill(2)
+
+              video_url = scene["video_url"]
+              voice_text = scene["voice_text"]
+
+              source_video = f"segments/source_{number}.mp4"
+              voice_file = f"segments/voice_{number}.mp3"
+              output_file = f"segments/scene_{number}.mp4"
+
+              print(f"Downloading scene {i}")
+
+              subprocess.run([
+                  "curl",
+                  "-L",
+                  "--fail",
+                  "--retry", "3",
+                  video_url,
+                  "-o",
+                  source_video
+              ], check=True)
+
+              print(f"Generating voice for scene {i}")
+
+              asyncio.run(
+                  make_voice(
+                      voice_text,
+                      voice_file
+                  )
+              )
+
+              duration = subprocess.check_output([
+                  "ffprobe",
+                  "-v", "error",
+                  "-show_entries",
+                  "format=duration",
+                  "-of",
+                  "default=noprint_wrappers=1:nokey=1",
+                  voice_file
+              ]).decode().strip()
+
+              duration = float(duration)
+
+              print(
+                  f"Scene {i} voice duration: "
+                  f"{duration:.2f} seconds"
+              )
+
+              subprocess.run([
+                  "ffmpeg",
+                  "-y",
+
+                  "-stream_loop", "-1",
+                  "-i", source_video,
+
+                  "-i", voice_file,
+
+                  "-t", str(duration),
+
+                  "-vf",
+                  (
+                      "scale=1080:1920:"
+                      "force_original_aspect_ratio=increase,"
+                      "crop=1080:1920,"
+                      "fps=30,"
+                      "format=yuv420p"
+                  ),
+
+                  "-map", "0:v:0",
+                  "-map", "1:a:0",
+
+                  "-c:v", "libx264",
+                  "-preset", "veryfast",
+                  "-crf", "23",
+
+                  "-c:a", "aac",
+                  "-b:a", "192k",
+                  "-ar", "48000",
+                  "-ac", "2",
+
+                  "-movflags", "+faststart",
+
+                  output_file
+              ], check=True)
+
+              segment_files.append(output_file)
+
+          with open(
+              "segments.txt",
+              "w",
+              encoding="utf-8"
+          ) as f:
+              for segment in segment_files:
+                  f.write(
+                      "file '" +
+                      os.path.abspath(segment) +
+                      "'\n"
+                  )
+
+          print("All scenes rendered")
           PY
 
-      - name: Render vertical video
+      - name: Join scenes
         run: |
           ffmpeg -y \
-            -stream_loop -1 \
-            -i input.mp4 \
-            -i voice.mp3 \
-            -map 0:v:0 \
-            -map 1:a:0 \
-            -shortest \
-            -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920" \
-            -c:v libx264 \
-            -preset veryfast \
-            -crf 23 \
-            -c:a aac \
-            -b:a 192k \
-            -ar 44100 \
+            -f concat \
+            -safe 0 \
+            -i segments.txt \
+            -c copy \
             -movflags +faststart \
             final.mp4
-            
+
+      - name: Check final video
+        run: |
+          ffprobe \
+            -v error \
+            -show_entries format=duration \
+            -show_entries stream=codec_name,width,height \
+            final.mp4
+
       - name: Upload final video
         uses: actions/upload-artifact@v4
         with:
