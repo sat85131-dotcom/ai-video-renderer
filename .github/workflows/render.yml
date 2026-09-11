@@ -52,20 +52,23 @@ jobs:
 
       - name: Render vertical video
         run: |
-          ffmpeg \
+          ffmpeg -y \
             -stream_loop -1 \
             -i input.mp4 \
             -i voice.mp3 \
+            -map 0:v:0 \
+            -map 1:a:0 \
             -shortest \
             -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920" \
             -c:v libx264 \
             -preset veryfast \
             -crf 23 \
             -c:a aac \
-            -b:a 128k \
+            -b:a 192k \
+            -ar 44100 \
             -movflags +faststart \
             final.mp4
-
+            
       - name: Upload final video
         uses: actions/upload-artifact@v4
         with:
