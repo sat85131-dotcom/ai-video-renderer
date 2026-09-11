@@ -42,7 +42,7 @@ jobs:
           os.makedirs("segments", exist_ok=True)
 
           async def make_voice(text, output):
-              voice = "en-US-GuyNeural"
+              voice = "ta-IN-PallaviNeural"
               communicate = edge_tts.Communicate(
                   text=text,
                   voice=voice
