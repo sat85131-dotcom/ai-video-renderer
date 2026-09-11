@@ -58,9 +58,10 @@ jobs:
           async def make_voice(text, output):
               voice = "ta-IN-PallaviNeural"
 
-              communicate = edge_tts.Communicate(
+                 communicate = edge_tts.Communicate(
                   text=text,
-                  voice=voice
+                  voice=voice,
+                  boundary="WordBoundary"
               )
 
               word_timings = []
