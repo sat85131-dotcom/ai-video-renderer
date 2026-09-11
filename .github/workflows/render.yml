@@ -3,12 +3,8 @@ name: Render AI Video
 on:
   workflow_dispatch:
     inputs:
-      video_url:
-        description: "Pexels video URL"
-        required: true
-        type: string
-      script_text:
-        description: "Voice script"
+      scenes_json:
+        description: "Scenes JSON"
         required: true
         type: string
 
