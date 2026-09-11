@@ -16,9 +16,8 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg fonts-noto-core
+          sudo apt-get install -y ffmpeg fonts-dejavu-core
           python3 -m pip install --upgrade edge-tts
-          python3 -m pip install openai-whisper
 
       - name: Save scenes JSON
         env:
@@ -35,142 +34,67 @@ jobs:
           import subprocess
           import asyncio
           import edge_tts
-          import whisper
 
           with open("scenes.json", "r", encoding="utf-8") as f:
               scenes = json.load(f)
 
           os.makedirs("segments", exist_ok=True)
 
-          print("Loading Whisper model...")
-          whisper_model = whisper.load_model("tiny")
-          print("Whisper ready")
-
-          def ass_time(seconds):
-              hours = int(seconds // 3600)
-              minutes = int((seconds % 3600) // 60)
-              secs = seconds % 60
-              return f"{hours}:{minutes:02d}:{secs:05.2f}"
-
-          def escape_ass(text):
-              return (
-                  str(text)
-                  .replace("\\", r"\\")
-                  .replace("{", r"\{")
-                  .replace("}", r"\}")
-                  .replace("\n", " ")
-                  .strip()
-              )
-
           async def make_voice(text, output):
               communicate = edge_tts.Communicate(
                   text=text,
-                  voice="ta-IN-PallaviNeural",
-                  rate="+0%"
+                  voice="en-US-AriaNeural",
+                  rate="+5%"
               )
-
               await communicate.save(output)
 
-          def get_word_timings(audio_file):
+          def srt_time(seconds):
+              ms = int((seconds % 1) * 1000)
+              total = int(seconds)
 
-              result = whisper_model.transcribe(
-                  audio_file,
-                  language="ta",
-                  task="transcribe",
-                  word_timestamps=True,
-                  fp16=False
+              hours = total // 3600
+              minutes = (total % 3600) // 60
+              secs = total % 60
+
+              return (
+                  f"{hours:02d}:"
+                  f"{minutes:02d}:"
+                  f"{secs:02d},"
+                  f"{ms:03d}"
               )
 
-              words = []
+          def create_simple_srt(text, duration, output_file):
+              words = text.split()
 
-              for segment in result.get("segments", []):
-                  for word in segment.get("words", []):
-                      text = word.get("word", "").strip()
-
-                      if not text:
-                          continue
-
-                      words.append({
-                          "text": text,
-                          "start": float(word["start"]),
-                          "end": float(word["end"])
-                      })
-
-              return words
-
-          def create_ass(words, output_file):
-
-              lines = [
-                  "[Script Info]",
-                  "ScriptType: v4.00+",
-                  "PlayResX: 1080",
-                  "PlayResY: 1920",
-                  "WrapStyle: 2",
-                  "ScaledBorderAndShadow: yes",
-                  "",
-                  "[V4+ Styles]",
-                  "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding",
-                  "Style: Default,Noto Sans Tamil,68,&H00FFFFFF,&H00FFFFFF,&H00000000,&H70000000,-1,0,0,0,100,100,0,0,1,5,1,2,70,70,330,1",
-                  "",
-                  "[Events]",
-                  "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text"
-              ]
+              if not words:
+                  return
 
               chunk_size = 4
 
-              for index, word in enumerate(words):
+              chunks = [
+                  words[i:i + chunk_size]
+                  for i in range(0, len(words), chunk_size)
+              ]
 
-                  group_start = (index // chunk_size) * chunk_size
-                  group_end = min(
-                      group_start + chunk_size,
-                      len(words)
-                  )
+              chunk_duration = duration / len(chunks)
 
-                  group = words[group_start:group_end]
+              lines = []
 
-                  display_words = []
+              for i, chunk in enumerate(chunks, start=1):
+                  start = (i - 1) * chunk_duration
+                  end = min(i * chunk_duration, duration)
 
-                  for local_index, item in enumerate(group):
-
-                      real_index = group_start + local_index
-                      safe_word = escape_ass(item["text"])
-
-                      if real_index == index:
-                          display_words.append(
-                              r"{\1c&H0000FF00&\b1}" +
-                              safe_word +
-                              r"{\1c&H00FFFFFF&\b1}"
-                          )
-                      else:
-                          display_words.append(
-                              r"{\1c&H00FFFFFF&\b1}" +
-                              safe_word
-                          )
-
-                  caption = " ".join(display_words)
-
-                  start = word["start"]
-
-                  if index + 1 < len(words):
-                      end = words[index + 1]["start"]
-                  else:
-                      end = word["end"] + 0.10
-
-                  if end <= start:
-                      end = start + 0.10
-
+                  lines.append(str(i))
                   lines.append(
-                      f"Dialogue: 0,"
-                      f"{ass_time(start)},"
-                      f"{ass_time(end)},"
-                      f"Default,,0,0,0,,"
-                      f"{{\\an2}}{caption}"
+                      f"{srt_time(start)} --> {srt_time(end)}"
                   )
+                  lines.append(" ".join(chunk))
+                  lines.append("")
 
               with open(
                   output_file,
                   "w",
-                  encoding="utf-8-sig"
+                  encoding="utf-8"
               ) as f:
                   f.write("\n".join(lines))
 
@@ -202,18 +126,18 @@ jobs:
               )
 
               subtitle_file = os.path.abspath(
-                  f"segments/subtitle_{number}.ass"
+                  f"segments/subtitle_{number}.srt"
               )
 
               output_file = (
                   f"segments/scene_{number}.mp4"
               )
 
-              print("==============================")
+              print("==========================")
               print(f"SCENE {i}")
-              print("==============================")
+              print("==========================")
 
-              print("Downloading video...")
+              print("Downloading clip...")
 
               subprocess.run([
                   "curl",
@@ -226,36 +150,13 @@ jobs:
                   source_video
               ], check=True)
 
-              print("Generating Tamil female voice...")
+              print("Generating English voice...")
 
               asyncio.run(
                   make_voice(
                       voice_text,
                       voice_file
                   )
-              )
-
-              print("Getting Whisper word timestamps...")
-
-              words = get_word_timings(
-                  voice_file
-              )
-
-              print(
-                  f"Scene {i}: "
-                  f"{len(words)} caption words"
-              )
-
-              if len(words) == 0:
-                  raise RuntimeError(
-                      f"Scene {i}: Whisper returned no words"
-                  )
-
-              print("Creating green-highlight captions...")
-
-              create_ass(
-                  words,
-                  subtitle_file
               )
 
               duration = subprocess.check_output([
@@ -271,13 +172,27 @@ jobs:
               duration = float(duration)
 
               print(
-                  f"Voice duration: "
-                  f"{duration:.2f}s"
+                  f"Voice duration: {duration:.2f}s"
+              )
+
+              create_simple_srt(
+                  voice_text,
+                  duration,
+                  subtitle_file
               )
 
               subtitle_filter = (
                   f"subtitles='{subtitle_file}':"
-                  "fontsdir='/usr/share/fonts'"
+                  "force_style='"
+                  "FontName=DejaVu Sans,"
+                  "FontSize=20,"
+                  "PrimaryColour=&H00FFFFFF,"
+                  "OutlineColour=&H00000000,"
+                  "BorderStyle=1,"
+                  "Outline=3,"
+                  "Shadow=1,"
+                  "Alignment=2,"
+                  "MarginV=250'"
               )
 
               video_filter = (
@@ -285,8 +200,8 @@ jobs:
                   "force_original_aspect_ratio=increase,"
                   "crop=1080:1920,"
                   "fps=30,"
-                  "eq=contrast=1.05:"
-                  "saturation=1.08:"
+                  "eq=contrast=1.06:"
+                  "saturation=1.10:"
                   "brightness=0.01,"
                   + subtitle_filter +
                   ",format=yuv420p"
@@ -341,7 +256,7 @@ jobs:
                       "'\n"
                   )
 
-          print("ALL SCENES READY")
+          print("ALL SCENES RENDERED")
           PY
 
       - name: Join scenes
