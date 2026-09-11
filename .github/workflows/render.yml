@@ -633,6 +633,33 @@ jobs:
           )
           PY
 
+      - name: Fix final video compatibility
+        run: |
+          echo "Fixing MP4 for mobile, browser and YouTube playback..."
+
+          ffmpeg -y \
+            -fflags +genpts \
+            -i final.mp4 \
+            -map 0:v:0 \
+            -map 0:a:0 \
+            -c:v libx264 \
+            -preset veryfast \
+            -crf 22 \
+            -pix_fmt yuv420p \
+            -profile:v high \
+            -level 4.1 \
+            -r 30 \
+            -c:a aac \
+            -b:a 192k \
+            -ar 48000 \
+            -ac 2 \
+            -movflags +faststart \
+            final_fixed.mp4
+
+          mv final_fixed.mp4 final.mp4
+
+          echo "PLAYBACK COMPATIBILITY FIXED"
+
       - name: Check final video
         run: |
           echo "===== FINAL VIDEO ====="
