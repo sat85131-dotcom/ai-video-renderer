@@ -53,32 +53,33 @@ jobs:
                   .replace("{", r"\{")
                   .replace("}", r"\}")
                   .replace("\n", " ")
-                            )
-                    async def make_voice(text, output):
-          voice = "ta-IN-PallaviNeural"
-      
-          communicate = edge_tts.Communicate(
-              text=text,
-              voice=voice,
-              boundary="WordBoundary"
-          )
-      
-          word_timings = []
-      
-          with open(output, "wb") as audio_file:
-              async for chunk in communicate.stream():
-      
-                  if chunk["type"] == "audio":
-                      audio_file.write(chunk["data"])
-      
-                  elif chunk["type"] == "WordBoundary":
-                      word_timings.append({
-                          "text": chunk["text"],
-                          "start": chunk["offset"] / 10000000,
-                          "duration": chunk["duration"] / 10000000
-                      })
-      
-          return word_timings
+              )
+
+          async def make_voice(text, output):
+              voice = "ta-IN-PallaviNeural"
+
+              communicate = edge_tts.Communicate(
+                  text=text,
+                  voice=voice,
+                  boundary="word"
+              )
+
+              word_timings = []
+
+              with open(output, "wb") as audio_file:
+                  async for chunk in communicate.stream():
+
+                      if chunk["type"] == "audio":
+                          audio_file.write(chunk["data"])
+
+                      elif chunk["type"] == "WordBoundary":
+                          word_timings.append({
+                              "text": chunk["text"],
+                              "start": chunk["offset"] / 10000000,
+                              "duration": chunk["duration"] / 10000000
+                          })
+
+              return word_timings
 
           def create_ass(words, output_file):
 
@@ -172,21 +173,14 @@ jobs:
               video_url = scene["video_url"]
               voice_text = scene["voice_text"]
 
-              source_video = (
-                  f"segments/source_{number}.mp4"
-              )
-
-              voice_file = (
-                  f"segments/voice_{number}.mp3"
-              )
+              source_video = f"segments/source_{number}.mp4"
+              voice_file = f"segments/voice_{number}.mp3"
 
               subtitle_file = os.path.abspath(
                   f"segments/subtitle_{number}.ass"
               )
 
-              output_file = (
-                  f"segments/scene_{number}.mp4"
-              )
+              output_file = f"segments/scene_{number}.mp4"
 
               print(f"Downloading scene {i}")
 
@@ -232,13 +226,6 @@ jobs:
                   f"Subtitle file: "
                   f"{subtitle_file}"
               )
-
-              with open(
-                  subtitle_file,
-                  "r",
-                  encoding="utf-8-sig"
-              ) as f:
-                  print(f.read())
 
               duration = subprocess.check_output([
                   "ffprobe",
