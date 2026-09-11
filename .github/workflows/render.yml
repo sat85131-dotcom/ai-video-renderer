@@ -23,12 +23,11 @@ jobs:
         run: |
           edge-tts --version
 
-      - name: Test Tamil word timing
+      - name: Test Tamil subtitles
         run: |
           edge-tts \
             --voice "ta-IN-PallaviNeural" \
             --text "வணக்கம் நண்பர்களே இன்று ஒரு அருமையான விஷயத்தை பார்க்கலாம்" \
-            --boundary word \
             --write-media test.mp3 \
             --write-subtitles test.srt
 
@@ -41,7 +40,6 @@ jobs:
             -show_entries format=duration \
             -of default=noprint_wrappers=1:nokey=1 \
             test.mp3
-
       - name: Upload test files
         uses: actions/upload-artifact@v4
         with:
