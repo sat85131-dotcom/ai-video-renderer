@@ -266,11 +266,23 @@ jobs:
                   "fontsdir='/usr/share/fonts'"
               )
 
+              # Add a subtle cinematic zoom so stock footage feels less static.
+              # Keep it gentle to avoid motion sickness and preserve caption readability.
+              zoom_filter = (
+                  "zoompan="
+                  "z='min(zoom+0.0008,1.06)':"
+                  "x='iw/2-(iw/zoom/2)':"
+                  "y='ih/2-(ih/zoom/2)':"
+                  "d=1:"
+                  "s=1080x1920:"
+                  "fps=30,"
+              )
+
               video_filter = (
                   "scale=1080:1920:"
                   "force_original_aspect_ratio=increase,"
                   "crop=1080:1920,"
-                  "fps=30,"
+                  + zoom_filter +
                   "eq=contrast=1.06:"
                   "saturation=1.10:"
                   "brightness=0.01,"
