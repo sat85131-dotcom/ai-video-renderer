@@ -2,11 +2,6 @@ name: Render AI Video
 
 on:
   workflow_dispatch:
-    inputs:
-      scenes_json:
-        description: "Scenes JSON"
-        required: false
-        type: string
 
 jobs:
   render:
@@ -17,15 +12,32 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg fonts-noto-core
+          python3 -m pip install --upgrade edge-tts
           python3 -m pip install openai-whisper
 
-      - name: Check edge-tts version
+      - name: Check tools
         run: |
           edge-tts --version
+          whisper --help > /dev/null
+          ffmpeg -version | head -n 1
 
-          - name: Test Tamil subtitles
-            - name: Test Whisper Tamil captions
-          run: |
+      - name: Generate Tamil female voice
+        run: |
+          edge-tts \
+            --voice "ta-IN-PallaviNeural" \
+            --text "வணக்கம் நண்பர்களே இன்று ஒரு அருமையான விஷயத்தை பார்க்கலாம்" \
+            --write-media test.mp3
+
+          echo "===== MP3 CREATED ====="
+
+          ffprobe \
+            -v error \
+            -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 \
+            test.mp3
+
+      - name: Generate Tamil subtitles with Whisper
+        run: |
           whisper test.mp3 \
             --model tiny \
             --language Tamil \
@@ -33,28 +45,19 @@ jobs:
             --output_format srt \
             --output_dir .
 
-          echo "===== WHISPER SRT ====="
-          cat test.srt
-        run: |
-          edge-tts \
-            --voice "ta-IN-PallaviNeural" \
-            --text "வணக்கம் நண்பர்களே இன்று ஒரு அருமையான விஷயத்தை பார்க்கலாம்" \
-            --write-media test.mp3 \
-            --write-subtitles test.srt
+          echo "===== WHISPER SUBTITLE ====="
 
-          echo "===== SUBTITLE TEST ====="
-          cat test.srt
+          if [ -f test.srt ]; then
+            cat test.srt
+          else
+            echo "ERROR: test.srt was not created"
+            exit 1
+          fi
 
-          echo "===== AUDIO DURATION ====="
-          ffprobe \
-            -v error \
-            -show_entries format=duration \
-            -of default=noprint_wrappers=1:nokey=1 \
-            test.mp3
       - name: Upload test files
         uses: actions/upload-artifact@v4
         with:
-          name: tamil-tts-test
+          name: tamil-voice-caption-test
           path: |
             test.mp3
             test.srt
