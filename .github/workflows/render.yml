@@ -58,7 +58,6 @@ jobs:
               hours = int(seconds // 3600)
               minutes = int((seconds % 3600) // 60)
               secs = seconds % 60
-
               return f"{hours}:{minutes:02d}:{secs:05.2f}"
 
           def escape_ass(text):
@@ -84,7 +83,6 @@ jobs:
 
               for segment in result.get("segments", []):
                   for word in segment.get("words", []):
-
                       text = word.get("word", "").strip()
 
                       if not text:
@@ -99,7 +97,6 @@ jobs:
               return words
 
           def create_ass(words, output_file):
-
               lines = [
                   "[Script Info]",
                   "ScriptType: v4.00+",
@@ -119,57 +116,38 @@ jobs:
               chunk_size = 4
 
               for index, word in enumerate(words):
-
-                  group_start = (
-                      index // chunk_size
-                  ) * chunk_size
-
+                  group_start = (index // chunk_size) * chunk_size
                   group_end = min(
                       group_start + chunk_size,
                       len(words)
                   )
 
-                  group = words[
-                      group_start:group_end
-                  ]
+                  group = words[group_start:group_end]
 
                   display_words = []
 
                   for local_index, item in enumerate(group):
-
-                      actual_index = (
-                          group_start + local_index
-                      )
-
-                      safe_word = escape_ass(
-                          item["text"]
-                      )
+                      actual_index = group_start + local_index
+                      safe_word = escape_ass(item["text"])
 
                       if actual_index == index:
-
                           display_words.append(
                               r"{\1c&H0000FF00&\b1}" +
                               safe_word +
                               r"{\1c&H00FFFFFF&\b1}"
                           )
-
                       else:
-
                           display_words.append(
                               r"{\1c&H00FFFFFF&\b1}" +
                               safe_word
                           )
 
-                  caption = " ".join(
-                      display_words
-                  )
+                  caption = " ".join(display_words)
 
                   start = word["start"]
 
                   if index + 1 < len(words):
-                      end = words[
-                          index + 1
-                      ]["start"]
+                      end = words[index + 1]["start"]
                   else:
                       end = word["end"] + 0.10
 
@@ -193,17 +171,10 @@ jobs:
 
           segment_files = []
 
-          for i, scene in enumerate(
-              scenes,
-              start=1
-          ):
-
+          for i, scene in enumerate(scenes, start=1):
               number = str(i).zfill(2)
 
-              video_url = scene.get(
-                  "video_url"
-              )
-
+              video_url = scene.get("video_url")
               voice_text = scene.get(
                   "voice_text",
                   ""
@@ -252,9 +223,7 @@ jobs:
                   source_video
               ], check=True)
 
-              print(
-                  "Generating English voice..."
-              )
+              print("Generating English voice...")
 
               asyncio.run(
                   make_voice(
@@ -263,9 +232,7 @@ jobs:
                   )
               )
 
-              print(
-                  "Getting exact word timings..."
-              )
+              print("Getting exact word timings...")
 
               words = get_word_timings(
                   voice_file
@@ -282,9 +249,7 @@ jobs:
                       f"Whisper returned no words"
                   )
 
-              print(
-                  "Creating green captions..."
-              )
+              print("Creating green captions...")
 
               create_ass(
                   words,
@@ -356,41 +321,203 @@ jobs:
                   "+faststart",
 
                   output_file
-
               ], check=True)
 
               segment_files.append(
                   output_file
               )
 
-          with open(
-              "segments.txt",
-              "w",
-              encoding="utf-8"
-          ) as f:
-
-              for segment in segment_files:
-
-                  f.write(
-                      "file '" +
-                      os.path.abspath(
-                          segment
-                      ) +
-                      "'\n"
-                  )
-
           print("ALL SCENES RENDERED")
           PY
 
-      - name: Join scenes
+      - name: Join scenes with dynamic transitions
         run: |
-          ffmpeg -y \
-            -f concat \
-            -safe 0 \
-            -i segments.txt \
-            -c copy \
-            -movflags +faststart \
-            final.mp4
+          python3 <<'PY'
+          import glob
+          import subprocess
+          import shutil
+
+          scenes = sorted(
+              glob.glob("segments/scene_*.mp4")
+          )
+
+          if not scenes:
+              raise RuntimeError(
+                  "No rendered scene files found"
+              )
+
+          if len(scenes) == 1:
+              shutil.copyfile(
+                  scenes[0],
+                  "final.mp4"
+              )
+              raise SystemExit(0)
+
+          durations = []
+
+          for scene in scenes:
+              duration = subprocess.check_output([
+                  "ffprobe",
+                  "-v", "error",
+                  "-show_entries",
+                  "format=duration",
+                  "-of",
+                  "default=noprint_wrappers=1:nokey=1",
+                  scene
+              ]).decode().strip()
+
+              durations.append(
+                  float(duration)
+              )
+
+          transition_duration = min(
+              0.25,
+              min(durations) / 3
+          )
+
+          print("Scene durations:")
+          for i, duration in enumerate(
+              durations,
+              start=1
+          ):
+              print(
+                  f"Scene {i}: "
+                  f"{duration:.2f}s"
+              )
+
+          print(
+              "Transition duration:",
+              transition_duration
+          )
+
+          command = [
+              "ffmpeg",
+              "-y"
+          ]
+
+          for scene in scenes:
+              command.extend([
+                  "-i",
+                  scene
+              ])
+
+          filters = []
+
+          for i in range(len(scenes)):
+              filters.append(
+                  f"[{i}:v]"
+                  f"settb=AVTB,"
+                  f"setpts=PTS-STARTPTS"
+                  f"[v{i}]"
+              )
+
+              filters.append(
+                  f"[{i}:a]"
+                  f"asetpts=PTS-STARTPTS"
+                  f"[a{i}]"
+              )
+
+          running_duration = durations[0]
+
+          video_left = "v0"
+          audio_left = "a0"
+
+          for i in range(1, len(scenes)):
+              video_output = f"vx{i}"
+              audio_output = f"ax{i}"
+
+              offset = (
+                  running_duration -
+                  transition_duration
+              )
+
+              filters.append(
+                  f"[{video_left}]"
+                  f"[v{i}]"
+                  f"xfade="
+                  f"transition=fade:"
+                  f"duration="
+                  f"{transition_duration:.3f}:"
+                  f"offset="
+                  f"{offset:.3f}"
+                  f"[{video_output}]"
+              )
+
+              filters.append(
+                  f"[{audio_left}]"
+                  f"[a{i}]"
+                  f"acrossfade="
+                  f"d="
+                  f"{transition_duration:.3f}:"
+                  f"c1=tri:"
+                  f"c2=tri"
+                  f"[{audio_output}]"
+              )
+
+              running_duration = (
+                  running_duration +
+                  durations[i] -
+                  transition_duration
+              )
+
+              video_left = video_output
+              audio_left = audio_output
+
+          filter_complex = ";".join(
+              filters
+          )
+
+          command.extend([
+              "-filter_complex",
+              filter_complex,
+
+              "-map",
+              f"[{video_left}]",
+
+              "-map",
+              f"[{audio_left}]",
+
+              "-c:v",
+              "libx264",
+
+              "-preset",
+              "veryfast",
+
+              "-crf",
+              "22",
+
+              "-c:a",
+              "aac",
+
+              "-b:a",
+              "192k",
+
+              "-ar",
+              "48000",
+
+              "-ac",
+              "2",
+
+              "-movflags",
+              "+faststart",
+
+              "final.mp4"
+          ])
+
+          print(
+              "Rendering final video "
+              "with dynamic transitions..."
+          )
+
+          subprocess.run(
+              command,
+              check=True
+          )
+
+          print(
+              "FINAL TRANSITION VIDEO READY"
+          )
+          PY
 
       - name: Check final video
         run: |
