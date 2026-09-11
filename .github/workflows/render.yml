@@ -23,7 +23,18 @@ jobs:
         run: |
           edge-tts --version
 
-      - name: Test Tamil subtitles
+          - name: Test Tamil subtitles
+            - name: Test Whisper Tamil captions
+          run: |
+          whisper test.mp3 \
+            --model tiny \
+            --language Tamil \
+            --task transcribe \
+            --output_format srt \
+            --output_dir .
+
+          echo "===== WHISPER SRT ====="
+          cat test.srt
         run: |
           edge-tts \
             --voice "ta-IN-PallaviNeural" \
