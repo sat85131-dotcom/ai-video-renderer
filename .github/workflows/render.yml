@@ -123,7 +123,6 @@ jobs:
                   )
 
                   group = words[group_start:group_end]
-
                   display_words = []
 
                   for local_index, item in enumerate(group):
@@ -143,7 +142,6 @@ jobs:
                           )
 
                   caption = " ".join(display_words)
-
                   start = word["start"]
 
                   if index + 1 < len(words):
@@ -190,21 +188,14 @@ jobs:
                       f"Scene {i}: voice_text missing"
                   )
 
-              source_video = (
-                  f"segments/source_{number}.mp4"
-              )
-
-              voice_file = (
-                  f"segments/voice_{number}.mp3"
-              )
+              source_video = f"segments/source_{number}.mp4"
+              voice_file = f"segments/voice_{number}.mp3"
 
               subtitle_file = os.path.abspath(
                   f"segments/subtitle_{number}.ass"
               )
 
-              output_file = (
-                  f"segments/scene_{number}.mp4"
-              )
+              output_file = f"segments/scene_{number}.mp4"
 
               print("==========================")
               print(f"SCENE {i}")
@@ -239,14 +230,12 @@ jobs:
               )
 
               print(
-                  f"Scene {i}: "
-                  f"{len(words)} words detected"
+                  f"Scene {i}: {len(words)} words detected"
               )
 
               if len(words) == 0:
                   raise RuntimeError(
-                      f"Scene {i}: "
-                      f"Whisper returned no words"
+                      f"Scene {i}: Whisper returned no words"
                   )
 
               print("Creating green captions...")
@@ -269,8 +258,7 @@ jobs:
               duration = float(duration)
 
               print(
-                  f"Voice duration: "
-                  f"{duration:.2f}s"
+                  f"Voice duration: {duration:.2f}s"
               )
 
               subtitle_filter = (
@@ -317,8 +305,7 @@ jobs:
                   "-ar", "48000",
                   "-ac", "2",
 
-                  "-movflags",
-                  "+faststart",
+                  "-movflags", "+faststart",
 
                   output_file
               ], check=True)
@@ -376,13 +363,13 @@ jobs:
           )
 
           print("Scene durations:")
+
           for i, duration in enumerate(
               durations,
               start=1
           ):
               print(
-                  f"Scene {i}: "
-                  f"{duration:.2f}s"
+                  f"Scene {i}: {duration:.2f}s"
               )
 
           print(
@@ -436,10 +423,8 @@ jobs:
                   f"[v{i}]"
                   f"xfade="
                   f"transition=fade:"
-                  f"duration="
-                  f"{transition_duration:.3f}:"
-                  f"offset="
-                  f"{offset:.3f}"
+                  f"duration={transition_duration:.3f}:"
+                  f"offset={offset:.3f}"
                   f"[{video_output}]"
               )
 
@@ -447,8 +432,7 @@ jobs:
                   f"[{audio_left}]"
                   f"[a{i}]"
                   f"acrossfade="
-                  f"d="
-                  f"{transition_duration:.3f}:"
+                  f"d={transition_duration:.3f}:"
                   f"c1=tri:"
                   f"c2=tri"
                   f"[{audio_output}]"
@@ -505,8 +489,7 @@ jobs:
           ])
 
           print(
-              "Rendering final video "
-              "with dynamic transitions..."
+              "Rendering final video with dynamic transitions..."
           )
 
           subprocess.run(
@@ -516,6 +499,137 @@ jobs:
 
           print(
               "FINAL TRANSITION VIDEO READY"
+          )
+          PY
+
+      - name: Add background music with voice ducking
+        run: |
+          python3 <<'PY'
+          import subprocess
+          import urllib.request
+          import os
+
+          MUSIC_URL = "https://cdn.pixabay.com/download/audio/2022/03/15/audio_115b9b04e5.mp3"
+
+          print("Downloading background music...")
+
+          try:
+              urllib.request.urlretrieve(
+                  MUSIC_URL,
+                  "background.mp3"
+              )
+
+          except Exception as e:
+              print(
+                  "Music download failed:",
+                  e
+              )
+
+              print(
+                  "Keeping video without background music."
+              )
+
+              raise SystemExit(0)
+
+          duration = subprocess.check_output([
+              "ffprobe",
+              "-v", "error",
+              "-show_entries",
+              "format=duration",
+              "-of",
+              "default=noprint_wrappers=1:nokey=1",
+              "final.mp4"
+          ]).decode().strip()
+
+          duration = float(duration)
+
+          print(
+              f"Final video duration: {duration:.2f}s"
+          )
+
+          filter_complex = (
+              "[1:a]"
+              "volume=0.12,"
+              f"atrim=0:{duration},"
+              "asetpts=PTS-STARTPTS"
+              "[music];"
+
+              "[0:a]"
+              "asplit=2"
+              "[voice][sidechain];"
+
+              "[music]"
+              "[sidechain]"
+              "sidechaincompress="
+              "threshold=0.02:"
+              "ratio=8:"
+              "attack=20:"
+              "release=350"
+              "[ducked];"
+
+              "[voice]"
+              "[ducked]"
+              "amix="
+              "inputs=2:"
+              "duration=first:"
+              "dropout_transition=2,"
+              "alimiter=limit=0.95"
+              "[mixed]"
+          )
+
+          subprocess.run([
+              "ffmpeg",
+              "-y",
+
+              "-i",
+              "final.mp4",
+
+              "-stream_loop",
+              "-1",
+
+              "-i",
+              "background.mp3",
+
+              "-filter_complex",
+              filter_complex,
+
+              "-map",
+              "0:v:0",
+
+              "-map",
+              "[mixed]",
+
+              "-c:v",
+              "copy",
+
+              "-c:a",
+              "aac",
+
+              "-b:a",
+              "192k",
+
+              "-ar",
+              "48000",
+
+              "-ac",
+              "2",
+
+              "-shortest",
+
+              "-movflags",
+              "+faststart",
+
+              "final_music.mp4"
+
+          ], check=True)
+
+          os.replace(
+              "final_music.mp4",
+              "final.mp4"
+          )
+
+          print(
+              "BACKGROUND MUSIC + VOICE DUCKING READY"
           )
           PY
 
