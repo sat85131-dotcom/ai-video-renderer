@@ -645,6 +645,53 @@ jobs:
           )
           PY
 
+      - name: Add hook impact SFX
+        run: |
+          echo "Creating hook impact SFX..."
+
+          ffmpeg -y \
+            -f lavfi \
+            -i "anoisesrc=color=white:duration=0.45:amplitude=0.15" \
+            -af "highpass=f=180,lowpass=f=2200,afade=t=out:st=0.08:d=0.37,volume=0.35" \
+            -ar 48000 \
+            -ac 2 \
+            whoosh.wav
+
+          ffmpeg -y \
+            -f lavfi \
+            -i "sine=frequency=75:duration=0.35:sample_rate=48000" \
+            -af "afade=t=out:st=0:d=0.35,volume=0.55" \
+            -ar 48000 \
+            -ac 2 \
+            thump.wav
+
+          ffmpeg -y \
+            -i whoosh.wav \
+            -i thump.wav \
+            -filter_complex "[0:a][1:a]amix=inputs=2:duration=longest:normalize=0,alimiter=limit=0.90[sfx]" \
+            -map "[sfx]" \
+            -ar 48000 \
+            -ac 2 \
+            hook_sfx.wav
+
+          ffmpeg -y \
+            -i final.mp4 \
+            -i hook_sfx.wav \
+            -filter_complex "[1:a]volume=0.55[sfx];[0:a][sfx]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95[aout]" \
+            -map 0:v:0 \
+            -map "[aout]" \
+            -c:v copy \
+            -c:a aac \
+            -b:a 192k \
+            -ar 48000 \
+            -ac 2 \
+            -movflags +faststart \
+            final_sfx.mp4
+
+          mv final_sfx.mp4 final.mp4
+
+          echo "HOOK IMPACT SFX READY"
+
       - name: Fix final video compatibility
         run: |
           echo "Fixing MP4 for mobile, browser and YouTube playback..."
