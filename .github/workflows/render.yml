@@ -5,7 +5,7 @@ on:
     inputs:
       scenes_json:
         description: "Scenes JSON"
-        required: true
+        required: false
         type: string
 
 jobs:
@@ -17,318 +17,35 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg fonts-noto-core
-          python3 -m pip install edge-tts
+          python3 -m pip install --upgrade edge-tts
 
-      - name: Save scenes JSON
-        env:
-          SCENES_JSON: ${{ inputs.scenes_json }}
+      - name: Check edge-tts version
         run: |
-          printf '%s' "$SCENES_JSON" > scenes.json
-          python3 -m json.tool scenes.json
+          edge-tts --version
 
-      - name: Render all scenes
+      - name: Test Tamil word timing
         run: |
-          python3 <<'PY'
-          import json
-          import os
-          import subprocess
-          import asyncio
-          import edge_tts
-
-          with open("scenes.json", "r", encoding="utf-8") as f:
-              scenes = json.load(f)
-
-          os.makedirs("segments", exist_ok=True)
-
-          def ass_time(seconds):
-              hours = int(seconds // 3600)
-              minutes = int((seconds % 3600) // 60)
-              secs = seconds % 60
-              return f"{hours}:{minutes:02d}:{secs:05.2f}"
-
-          def escape_ass(text):
-              return (
-                  str(text)
-                  .replace("\\", r"\\")
-                  .replace("{", r"\{")
-                  .replace("}", r"\}")
-                  .replace("\n", " ")
-              )
-
-          async def make_voice(text, output):
-              voice = "ta-IN-PallaviNeural"
-
-              communicate = edge_tts.Communicate(
-                  text=text,
-                  voice=voice,
-                  boundary="word"
-              )
-
-              word_timings = []
-
-              with open(output, "wb") as audio_file:
-                  async for chunk in communicate.stream():
-
-                      if chunk["type"] == "audio":
-                          audio_file.write(chunk["data"])
-
-                      elif chunk["type"] == "WordBoundary":
-                          word_timings.append({
-                              "text": chunk["text"],
-                              "start": chunk["offset"] / 10000000,
-                              "duration": chunk["duration"] / 10000000
-                          })
-
-              return word_timings
-
-          def create_ass(words, output_file):
-
-              header_lines = [
-                  "[Script Info]",
-                  "ScriptType: v4.00+",
-                  "PlayResX: 1080",
-                  "PlayResY: 1920",
-                  "WrapStyle: 2",
-                  "ScaledBorderAndShadow: yes",
-                  "",
-                  "[V4+ Styles]",
-                  "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding",
-                  "Style: Default,Noto Sans Tamil,70,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,5,1,2,70,70,330,1",
-                  "",
-                  "[Events]",
-                  "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text"
-              ]
-
-              lines = header_lines[:]
-
-              chunk_size = 4
-
-              for index, word in enumerate(words):
-
-                  group_start = (index // chunk_size) * chunk_size
-                  group_end = min(
-                      group_start + chunk_size,
-                      len(words)
-                  )
-
-                  group = words[group_start:group_end]
-
-                  display_words = []
-
-                  for local_index, item in enumerate(group):
-                      real_index = group_start + local_index
-                      safe = escape_ass(item["text"])
-
-                      if real_index == index:
-                          display_words.append(
-                              r"{\1c&H0000FF00&\b1}" +
-                              safe +
-                              r"{\1c&H00FFFFFF&\b1}"
-                          )
-                      else:
-                          display_words.append(
-                              r"{\1c&H00FFFFFF&\b1}" +
-                              safe
-                          )
-
-                  caption = " ".join(display_words)
-
-                  start = word["start"]
-
-                  if index + 1 < len(words):
-                      end = words[index + 1]["start"]
-                  else:
-                      end = (
-                          word["start"] +
-                          word["duration"] +
-                          0.15
-                      )
-
-                  if end <= start:
-                      end = start + 0.15
-
-                  line = (
-                      f"Dialogue: 0,"
-                      f"{ass_time(start)},"
-                      f"{ass_time(end)},"
-                      f"Default,,0,0,0,,"
-                      f"{{\\an2}}{caption}"
-                  )
-
-                  lines.append(line)
-
-              with open(
-                  output_file,
-                  "w",
-                  encoding="utf-8-sig"
-              ) as f:
-                  f.write("\n".join(lines))
-
-          segment_files = []
-
-          for i, scene in enumerate(scenes, start=1):
-
-              number = str(i).zfill(2)
-
-              video_url = scene["video_url"]
-              voice_text = scene["voice_text"]
-
-              source_video = f"segments/source_{number}.mp4"
-              voice_file = f"segments/voice_{number}.mp3"
-
-              subtitle_file = os.path.abspath(
-                  f"segments/subtitle_{number}.ass"
-              )
-
-              output_file = f"segments/scene_{number}.mp4"
-
-              print(f"Downloading scene {i}")
-
-              subprocess.run([
-                  "curl",
-                  "-L",
-                  "--fail",
-                  "--retry", "3",
-                  video_url,
-                  "-o",
-                  source_video
-              ], check=True)
-
-              print(
-                  f"Generating Tamil female voice "
-                  f"for scene {i}"
-              )
-
-              word_timings = asyncio.run(
-                  make_voice(
-                      voice_text,
-                      voice_file
-                  )
-              )
-
-              print(
-                  f"Scene {i} word timings: "
-                  f"{len(word_timings)} words"
-              )
-
-              if len(word_timings) == 0:
-                  raise RuntimeError(
-                      f"No word timings generated "
-                      f"for scene {i}"
-                  )
-
-              create_ass(
-                  word_timings,
-                  subtitle_file
-              )
-
-              print(
-                  f"Subtitle file: "
-                  f"{subtitle_file}"
-              )
-
-              duration = subprocess.check_output([
-                  "ffprobe",
-                  "-v", "error",
-                  "-show_entries",
-                  "format=duration",
-                  "-of",
-                  "default=noprint_wrappers=1:nokey=1",
-                  voice_file
-              ]).decode().strip()
-
-              duration = float(duration)
-
-              print(
-                  f"Scene {i} voice duration: "
-                  f"{duration:.2f} seconds"
-              )
-
-              subtitle_filter = (
-                  f"subtitles='{subtitle_file}':"
-                  "fontsdir='/usr/share/fonts'"
-              )
-
-              video_filter = (
-                  "scale=1080:1920:"
-                  "force_original_aspect_ratio=increase,"
-                  "crop=1080:1920,"
-                  "fps=30,"
-                  "eq=contrast=1.05:saturation=1.08,"
-                  + subtitle_filter +
-                  ",format=yuv420p"
-              )
-
-              subprocess.run([
-                  "ffmpeg",
-                  "-y",
-
-                  "-stream_loop", "-1",
-                  "-i", source_video,
-
-                  "-i", voice_file,
-
-                  "-t", str(duration),
-
-                  "-vf", video_filter,
-
-                  "-map", "0:v:0",
-                  "-map", "1:a:0",
-
-                  "-c:v", "libx264",
-                  "-preset", "veryfast",
-                  "-crf", "23",
-
-                  "-c:a", "aac",
-                  "-b:a", "192k",
-                  "-ar", "48000",
-                  "-ac", "2",
-
-                  "-movflags", "+faststart",
-
-                  output_file
-              ], check=True)
-
-              segment_files.append(
-                  output_file
-              )
-
-          with open(
-              "segments.txt",
-              "w",
-              encoding="utf-8"
-          ) as f:
-
-              for segment in segment_files:
-                  f.write(
-                      "file '" +
-                      os.path.abspath(segment) +
-                      "'\n"
-                  )
-
-          print("All scenes rendered")
-          PY
-
-      - name: Join scenes
-        run: |
-          ffmpeg -y \
-            -f concat \
-            -safe 0 \
-            -i segments.txt \
-            -c copy \
-            -movflags +faststart \
-            final.mp4
-
-      - name: Check final video
-        run: |
+          edge-tts \
+            --voice "ta-IN-PallaviNeural" \
+            --text "வணக்கம் நண்பர்களே இன்று ஒரு அருமையான விஷயத்தை பார்க்கலாம்" \
+            --boundary word \
+            --write-media test.mp3 \
+            --write-subtitles test.srt
+
+          echo "===== SUBTITLE TEST ====="
+          cat test.srt
+
+          echo "===== AUDIO DURATION ====="
           ffprobe \
             -v error \
             -show_entries format=duration \
-            -show_entries stream=codec_name,width,height \
-            final.mp4
+            -of default=noprint_wrappers=1:nokey=1 \
+            test.mp3
 
-      - name: Upload final video
+      - name: Upload test files
         uses: actions/upload-artifact@v4
         with:
-          name: final-video
-          path: final.mp4
+          name: tamil-tts-test
+          path: |
+            test.mp3
+            test.srt
