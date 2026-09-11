@@ -48,7 +48,7 @@ jobs:
 
           def escape_ass(text):
               return (
-                  text
+                  str(text)
                   .replace("\\", r"\\")
                   .replace("{", r"\{")
                   .replace("}", r"\}")
@@ -81,67 +81,112 @@ jobs:
               return word_timings
 
           def create_ass(words, output_file):
-              header = """[Script Info]
-          ScriptType: v4.00+
-          PlayResX: 1080
-          PlayResY: 1920
-          WrapStyle: 2
-          ScaledBorderAndShadow: yes
 
-          [V4+ Styles]
-          Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
-          Style: Default,Noto Sans Tamil,64,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,4,1,2,80,80,300,1
+              header_lines = [
+                  "[Script Info]",
+                  "ScriptType: v4.00+",
+                  "PlayResX: 1080",
+                  "PlayResY: 1920",
+                  "WrapStyle: 2",
+                  "ScaledBorderAndShadow: yes",
+                  "",
+                  "[V4+ Styles]",
+                  "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding",
+                  "Style: Default,Noto Sans Tamil,70,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,5,1,2,70,70,330,1",
+                  "",
+                  "[Events]",
+                  "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text"
+              ]
 
-          [Events]
-          Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
-          """
+              lines = header_lines[:]
 
-              lines = [header]
-
-              all_words = [w["text"] for w in words]
+              chunk_size = 4
 
               for index, word in enumerate(words):
-                  start = word["start"]
-                  end = start + word["duration"]
+
+                  group_start = (index // chunk_size) * chunk_size
+                  group_end = min(
+                      group_start + chunk_size,
+                      len(words)
+                  )
+
+                  group = words[group_start:group_end]
 
                   display_words = []
 
-                  for j, item in enumerate(all_words):
-                      safe = escape_ass(item)
+                  for local_index, item in enumerate(group):
+                      real_index = group_start + local_index
+                      safe = escape_ass(item["text"])
 
-                      if j == index:
+                      if real_index == index:
                           display_words.append(
-                              r"{\c&H00FF00&}" + safe + r"{\c&HFFFFFF&}"
+                              r"{\1c&H0000FF00&\b1}" +
+                              safe +
+                              r"{\1c&H00FFFFFF&\b1}"
                           )
                       else:
-                          display_words.append(safe)
+                          display_words.append(
+                              r"{\1c&H00FFFFFF&\b1}" +
+                              safe
+                          )
 
                   caption = " ".join(display_words)
+
+                  start = word["start"]
+
+                  if index + 1 < len(words):
+                      end = words[index + 1]["start"]
+                  else:
+                      end = (
+                          word["start"] +
+                          word["duration"] +
+                          0.15
+                      )
+
+                  if end <= start:
+                      end = start + 0.15
 
                   line = (
                       f"Dialogue: 0,"
                       f"{ass_time(start)},"
                       f"{ass_time(end)},"
-                      f"Default,,0,0,0,,{caption}"
+                      f"Default,,0,0,0,,"
+                      f"{{\\an2}}{caption}"
                   )
 
                   lines.append(line)
 
-              with open(output_file, "w", encoding="utf-8") as f:
+              with open(
+                  output_file,
+                  "w",
+                  encoding="utf-8-sig"
+              ) as f:
                   f.write("\n".join(lines))
 
           segment_files = []
 
           for i, scene in enumerate(scenes, start=1):
+
               number = str(i).zfill(2)
 
               video_url = scene["video_url"]
               voice_text = scene["voice_text"]
 
-              source_video = f"segments/source_{number}.mp4"
-              voice_file = f"segments/voice_{number}.mp3"
-              subtitle_file = f"segments/subtitle_{number}.ass"
-              output_file = f"segments/scene_{number}.mp4"
+              source_video = (
+                  f"segments/source_{number}.mp4"
+              )
+
+              voice_file = (
+                  f"segments/voice_{number}.mp3"
+              )
+
+              subtitle_file = os.path.abspath(
+                  f"segments/subtitle_{number}.ass"
+              )
+
+              output_file = (
+                  f"segments/scene_{number}.mp4"
+              )
 
               print(f"Downloading scene {i}")
 
@@ -155,7 +200,10 @@ jobs:
                   source_video
               ], check=True)
 
-              print(f"Generating Tamil female voice for scene {i}")
+              print(
+                  f"Generating Tamil female voice "
+                  f"for scene {i}"
+              )
 
               word_timings = asyncio.run(
                   make_voice(
@@ -169,10 +217,28 @@ jobs:
                   f"{len(word_timings)} words"
               )
 
+              if len(word_timings) == 0:
+                  raise RuntimeError(
+                      f"No word timings generated "
+                      f"for scene {i}"
+                  )
+
               create_ass(
                   word_timings,
                   subtitle_file
               )
+
+              print(
+                  f"Subtitle file: "
+                  f"{subtitle_file}"
+              )
+
+              with open(
+                  subtitle_file,
+                  "r",
+                  encoding="utf-8-sig"
+              ) as f:
+                  print(f.read())
 
               duration = subprocess.check_output([
                   "ffprobe",
@@ -192,8 +258,8 @@ jobs:
               )
 
               subtitle_filter = (
-                  f"subtitles={subtitle_file}:"
-                  "fontsdir=/usr/share/fonts"
+                  f"subtitles='{subtitle_file}':"
+                  "fontsdir='/usr/share/fonts'"
               )
 
               video_filter = (
@@ -236,13 +302,16 @@ jobs:
                   output_file
               ], check=True)
 
-              segment_files.append(output_file)
+              segment_files.append(
+                  output_file
+              )
 
           with open(
               "segments.txt",
               "w",
               encoding="utf-8"
           ) as f:
+
               for segment in segment_files:
                   f.write(
                       "file '" +
