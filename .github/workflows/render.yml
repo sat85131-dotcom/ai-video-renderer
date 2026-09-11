@@ -16,7 +16,7 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg fonts-noto-core
           python3 -m pip install edge-tts
 
       - name: Save scenes JSON
@@ -34,20 +34,101 @@ jobs:
           import subprocess
           import asyncio
           import edge_tts
-          import textwrap
 
           with open("scenes.json", "r", encoding="utf-8") as f:
               scenes = json.load(f)
 
           os.makedirs("segments", exist_ok=True)
 
+          def ass_time(seconds):
+              hours = int(seconds // 3600)
+              minutes = int((seconds % 3600) // 60)
+              secs = seconds % 60
+              return f"{hours}:{minutes:02d}:{secs:05.2f}"
+
+          def escape_ass(text):
+              return (
+                  text
+                  .replace("\\", r"\\")
+                  .replace("{", r"\{")
+                  .replace("}", r"\}")
+                  .replace("\n", " ")
+              )
+
           async def make_voice(text, output):
               voice = "ta-IN-PallaviNeural"
+
               communicate = edge_tts.Communicate(
                   text=text,
                   voice=voice
               )
-              await communicate.save(output)
+
+              word_timings = []
+
+              with open(output, "wb") as audio_file:
+                  async for chunk in communicate.stream():
+
+                      if chunk["type"] == "audio":
+                          audio_file.write(chunk["data"])
+
+                      elif chunk["type"] == "WordBoundary":
+                          word_timings.append({
+                              "text": chunk["text"],
+                              "start": chunk["offset"] / 10000000,
+                              "duration": chunk["duration"] / 10000000
+                          })
+
+              return word_timings
+
+          def create_ass(words, output_file):
+              header = """[Script Info]
+          ScriptType: v4.00+
+          PlayResX: 1080
+          PlayResY: 1920
+          WrapStyle: 2
+          ScaledBorderAndShadow: yes
+
+          [V4+ Styles]
+          Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
+          Style: Default,Noto Sans Tamil,64,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,4,1,2,80,80,300,1
+
+          [Events]
+          Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
+          """
+
+              lines = [header]
+
+              all_words = [w["text"] for w in words]
+
+              for index, word in enumerate(words):
+                  start = word["start"]
+                  end = start + word["duration"]
+
+                  display_words = []
+
+                  for j, item in enumerate(all_words):
+                      safe = escape_ass(item)
+
+                      if j == index:
+                          display_words.append(
+                              r"{\c&H00FF00&}" + safe + r"{\c&HFFFFFF&}"
+                          )
+                      else:
+                          display_words.append(safe)
+
+                  caption = " ".join(display_words)
+
+                  line = (
+                      f"Dialogue: 0,"
+                      f"{ass_time(start)},"
+                      f"{ass_time(end)},"
+                      f"Default,,0,0,0,,{caption}"
+                  )
+
+                  lines.append(line)
+
+              with open(output_file, "w", encoding="utf-8") as f:
+                  f.write("\n".join(lines))
 
           segment_files = []
 
@@ -59,20 +140,8 @@ jobs:
 
               source_video = f"segments/source_{number}.mp4"
               voice_file = f"segments/voice_{number}.mp3"
+              subtitle_file = f"segments/subtitle_{number}.ass"
               output_file = f"segments/scene_{number}.mp4"
-              caption_file = f"segments/caption_{number}.txt"
-
-              wrapped_caption = textwrap.fill(
-                  voice_text,
-                  width=26
-              )
-
-              with open(
-                  caption_file,
-                  "w",
-                  encoding="utf-8"
-              ) as f:
-                  f.write(wrapped_caption)
 
               print(f"Downloading scene {i}")
 
@@ -86,13 +155,23 @@ jobs:
                   source_video
               ], check=True)
 
-              print(f"Generating voice for scene {i}")
+              print(f"Generating Tamil female voice for scene {i}")
 
-              asyncio.run(
+              word_timings = asyncio.run(
                   make_voice(
                       voice_text,
                       voice_file
                   )
+              )
+
+              print(
+                  f"Scene {i} word timings: "
+                  f"{len(word_timings)} words"
+              )
+
+              create_ass(
+                  word_timings,
+                  subtitle_file
               )
 
               duration = subprocess.check_output([
@@ -112,6 +191,21 @@ jobs:
                   f"{duration:.2f} seconds"
               )
 
+              subtitle_filter = (
+                  f"subtitles={subtitle_file}:"
+                  "fontsdir=/usr/share/fonts"
+              )
+
+              video_filter = (
+                  "scale=1080:1920:"
+                  "force_original_aspect_ratio=increase,"
+                  "crop=1080:1920,"
+                  "fps=30,"
+                  "eq=contrast=1.05:saturation=1.08,"
+                  + subtitle_filter +
+                  ",format=yuv420p"
+              )
+
               subprocess.run([
                   "ffmpeg",
                   "-y",
@@ -123,25 +217,7 @@ jobs:
 
                   "-t", str(duration),
 
-                  "-vf",
-                  (
-                      "scale=1080:1920:"
-                      "force_original_aspect_ratio=increase,"
-                      "crop=1080:1920,"
-                      "fps=30,"
-                      "eq=contrast=1.05:saturation=1.08,"
-                      "drawtext="
-                      f"textfile='{caption_file}':"
-                      "fontcolor=white:"
-                      "fontsize=54:"
-                      "borderw=4:"
-                      "bordercolor=black:"
-                      "line_spacing=12:"
-                      "x=(w-text_w)/2:"
-                      "y=h-text_h-300:"
-                      "expansion=none,"
-                      "format=yuv420p"
-                  ),
+                  "-vf", video_filter,
 
                   "-map", "0:v:0",
                   "-map", "1:a:0",
