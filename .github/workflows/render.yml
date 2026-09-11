@@ -34,6 +34,7 @@ jobs:
           import subprocess
           import asyncio
           import edge_tts
+          import textwrap
 
           with open("scenes.json", "r", encoding="utf-8") as f:
               scenes = json.load(f)
@@ -59,6 +60,19 @@ jobs:
               source_video = f"segments/source_{number}.mp4"
               voice_file = f"segments/voice_{number}.mp3"
               output_file = f"segments/scene_{number}.mp4"
+              caption_file = f"segments/caption_{number}.txt"
+
+              wrapped_caption = textwrap.fill(
+                  voice_text,
+                  width=26
+              )
+
+              with open(
+                  caption_file,
+                  "w",
+                  encoding="utf-8"
+              ) as f:
+                  f.write(wrapped_caption)
 
               print(f"Downloading scene {i}")
 
@@ -115,6 +129,17 @@ jobs:
                       "force_original_aspect_ratio=increase,"
                       "crop=1080:1920,"
                       "fps=30,"
+                      "eq=contrast=1.05:saturation=1.08,"
+                      "drawtext="
+                      f"textfile='{caption_file}':"
+                      "fontcolor=white:"
+                      "fontsize=54:"
+                      "borderw=4:"
+                      "bordercolor=black:"
+                      "line_spacing=12:"
+                      "x=(w-text_w)/2:"
+                      "y=h-text_h-300:"
+                      "expansion=none,"
                       "format=yuv420p"
                   ),
 
