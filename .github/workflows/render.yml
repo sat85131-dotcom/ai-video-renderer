@@ -54,32 +54,31 @@ jobs:
                   .replace("}", r"\}")
                   .replace("\n", " ")
                             )
-              
-              async def make_voice(text, output):
-                  voice = "ta-IN-PallaviNeural"
-              
-                  communicate = edge_tts.Communicate(
-                      text=text,
-                      voice=voice,
-                      boundary="WordBoundary"
-                  )
-              
-                  word_timings = []
-              
-                  with open(output, "wb") as audio_file:
-                      async for chunk in communicate.stream():
-              
-                          if chunk["type"] == "audio":
-                              audio_file.write(chunk["data"])
-              
-                          elif chunk["type"] == "WordBoundary":
-                              word_timings.append({
-                                  "text": chunk["text"],
-                                  "start": chunk["offset"] / 10000000,
-                                  "duration": chunk["duration"] / 10000000
-                              })
-              
-                  return word_timings
+                    async def make_voice(text, output):
+          voice = "ta-IN-PallaviNeural"
+      
+          communicate = edge_tts.Communicate(
+              text=text,
+              voice=voice,
+              boundary="WordBoundary"
+          )
+      
+          word_timings = []
+      
+          with open(output, "wb") as audio_file:
+              async for chunk in communicate.stream():
+      
+                  if chunk["type"] == "audio":
+                      audio_file.write(chunk["data"])
+      
+                  elif chunk["type"] == "WordBoundary":
+                      word_timings.append({
+                          "text": chunk["text"],
+                          "start": chunk["offset"] / 10000000,
+                          "duration": chunk["duration"] / 10000000
+                      })
+      
+          return word_timings
 
           def create_ass(words, output_file):
 
