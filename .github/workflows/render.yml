@@ -35,8 +35,8 @@ jobs:
           import subprocess
           import edge_tts
 
-          TAMIL_VOICE = "ta-IN-PallaviNeural"
-          TTS_RATE = "+5%"
+          TAMIL_VOICE = "ta-IN-ValluvarNeural"
+          TTS_RATE = "+0%"
           TTS_PITCH = "+0Hz"
           TTS_VOLUME = "+0%"
 
