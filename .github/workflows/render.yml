@@ -36,7 +36,7 @@ jobs:
           import edge_tts
 
           TAMIL_VOICE = "ta-IN-PallaviNeural"
-          TTS_RATE = "+12%"
+          TTS_RATE = "+15%"
           TTS_PITCH = "+0Hz"
           TTS_VOLUME = "+0%"
 
@@ -96,6 +96,47 @@ jobs:
 
               return spoken_text, words
 
+
+          def build_fallback_timings(spoken_text, audio_duration):
+              # Fallback for Tamil when Edge TTS returns audio but no WordBoundary events.
+              tokens = [t for t in re.split(r"\s+", spoken_text.strip()) if t]
+
+              if not tokens:
+                  return []
+
+              usable_duration = max(float(audio_duration) - 0.10, 0.20)
+
+              weights = []
+              for token in tokens:
+                  cleaned = re.sub(r"[^\w\u0B80-\u0BFF]", "", token)
+                  weights.append(max(len(cleaned), 1))
+
+              total_weight = sum(weights)
+              cursor = 0.0
+              words = []
+
+              for index, (token, weight) in enumerate(zip(tokens, weights)):
+                  share = usable_duration * (weight / total_weight)
+                  start = cursor
+
+                  if index == len(tokens) - 1:
+                      end = usable_duration
+                  else:
+                      end = min(usable_duration, cursor + max(share, 0.08))
+
+                  if end <= start:
+                      end = min(usable_duration, start + 0.08)
+
+                  words.append({
+                      "text": token.strip(),
+                      "start": start,
+                      "end": end,
+                  })
+
+                  cursor = end
+
+              return words
+
           def ass_time(seconds):
               hours = int(seconds // 3600)
               minutes = int((seconds % 3600) // 60)
@@ -129,7 +170,7 @@ jobs:
                   "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text",
               ]
 
-              chunk_size = 3
+              chunk_size = 2
 
               for index, word in enumerate(words):
                   group_start = (index // chunk_size) * chunk_size
@@ -198,17 +239,22 @@ jobs:
               spoken_text, words = make_voice_with_timings(voice_text, voice_file)
 
               print("TTS text:", spoken_text)
-              print(f"Scene {i}: {len(words)} TTS word boundaries")
-
-              if not words:
-                  raise RuntimeError(f"Scene {i}: Edge TTS returned no word boundaries")
-
-              create_ass(words, subtitle_file)
+              print(f"Scene {i}: {len(words)} Edge TTS word boundaries")
 
               duration = float(subprocess.check_output([
                   "ffprobe", "-v", "error", "-show_entries", "format=duration",
                   "-of", "default=noprint_wrappers=1:nokey=1", voice_file
               ]).decode().strip())
+
+              if not words:
+                  print("No WordBoundary events. Using audio-duration fallback timings...")
+                  words = build_fallback_timings(spoken_text, duration)
+                  print(f"Scene {i}: {len(words)} fallback caption words")
+
+              if not words:
+                  raise RuntimeError(f"Scene {i}: could not build caption timings")
+
+              create_ass(words, subtitle_file)
 
               scene_duration = duration + 0.12
               print(f"Voice duration: {duration:.2f}s")
@@ -487,7 +533,7 @@ jobs:
 
           filter_complex = (
               "[1:a]"
-              "volume=0.08,"
+              "volume=0.06,"
               f"atrim=0:{duration},"
               "asetpts=PTS-STARTPTS"
               "[music];"
@@ -603,7 +649,7 @@ jobs:
           ffmpeg -y \
             -i final.mp4 \
             -i hook_sfx.wav \
-            -filter_complex "[1:a]volume=0.55[sfx];[0:a][sfx]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95[aout]" \
+            -filter_complex "[1:a]volume=0.35[sfx];[0:a][sfx]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95[aout]" \
             -map 0:v:0 \
             -map "[aout]" \
             -c:v copy \
