@@ -36,7 +36,7 @@ jobs:
           import edge_tts
 
           TAMIL_VOICE = "ta-IN-PallaviNeural"
-          TTS_RATE = "+15%"
+          TTS_RATE = "+5%"
           TTS_PITCH = "+0Hz"
           TTS_VOLUME = "+0%"
 
