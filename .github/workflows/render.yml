@@ -16,9 +16,8 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg fonts-dejavu-core fonts-noto-core fonts-noto-extra
+          sudo apt-get install -y ffmpeg fonts-noto-core fonts-noto-extra
           python3 -m pip install --upgrade edge-tts
-          python3 -m pip install openai-whisper
 
       - name: Save scenes JSON
         env:
@@ -32,27 +31,70 @@ jobs:
           python3 <<'PY'
           import json
           import os
+          import re
           import subprocess
-          import asyncio
           import edge_tts
-          import whisper
+
+          TAMIL_VOICE = "ta-IN-PallaviNeural"
+          TTS_RATE = "+12%"
+          TTS_PITCH = "+0Hz"
+          TTS_VOLUME = "+0%"
 
           with open("scenes.json", "r", encoding="utf-8") as f:
               scenes = json.load(f)
 
           os.makedirs("segments", exist_ok=True)
 
-          print("Loading Whisper model...")
-          whisper_model = whisper.load_model("tiny")
-          print("Whisper ready")
+          def normalize_spoken_tamil(text):
+              text = str(text or "").strip()
+              text = text.replace("…", ".")
+              text = text.replace("—", ",")
+              text = text.replace("–", ",")
+              text = re.sub(r"\.{2,}", ".", text)
+              text = re.sub(r",\s*,+", ", ", text)
+              text = re.sub(r"\s*;\s*", ", ", text)
+              text = re.sub(r"\s*:\s*", ", ", text)
+              text = re.sub(r"\s+", " ", text)
+              return text.strip()
 
-          async def make_voice(text, output):
+          def seconds_from_ticks(value):
+              return float(value) / 10_000_000.0
+
+          def make_voice_with_timings(text, output):
+              spoken_text = normalize_spoken_tamil(text)
+
               communicate = edge_tts.Communicate(
-                  text=text,
-                  voice="ta-IN-PallaviNeural",
-                  rate="+5%"
+                  spoken_text,
+                  voice=TAMIL_VOICE,
+                  rate=TTS_RATE,
+                  pitch=TTS_PITCH,
+                  volume=TTS_VOLUME,
               )
-              await communicate.save(output)
+
+              words = []
+
+              with open(output, "wb") as audio_file:
+                  for chunk in communicate.stream_sync():
+                      if chunk["type"] == "audio":
+                          audio_file.write(chunk["data"])
+                      elif chunk["type"] == "WordBoundary":
+                          word = str(chunk.get("text", "")).strip()
+                          if not word:
+                              continue
+
+                          start = seconds_from_ticks(chunk["offset"])
+                          duration = seconds_from_ticks(chunk["duration"])
+
+                          words.append({
+                              "text": word,
+                              "start": start,
+                              "end": start + max(duration, 0.06),
+                          })
+
+              if not os.path.exists(output) or os.path.getsize(output) == 0:
+                  raise RuntimeError("Tamil TTS created no audio")
+
+              return spoken_text, words
 
           def ass_time(seconds):
               hours = int(seconds // 3600)
@@ -70,32 +112,6 @@ jobs:
                   .strip()
               )
 
-          def get_word_timings(audio_file):
-              result = whisper_model.transcribe(
-                  audio_file,
-                  language="ta",
-                  task="transcribe",
-                  word_timestamps=True,
-                  fp16=False
-              )
-
-              words = []
-
-              for segment in result.get("segments", []):
-                  for word in segment.get("words", []):
-                      text = word.get("word", "").strip()
-
-                      if not text:
-                          continue
-
-                      words.append({
-                          "text": text,
-                          "start": float(word["start"]),
-                          "end": float(word["end"])
-                      })
-
-              return words
-
           def create_ass(words, output_file):
               lines = [
                   "[Script Info]",
@@ -107,22 +123,19 @@ jobs:
                   "",
                   "[V4+ Styles]",
                   "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding",
-                  "Style: Default,Noto Sans Tamil,68,&H00FFFFFF,&H00FFFFFF,&H00000000,&H70000000,-1,0,0,0,100,100,0,0,1,5,1,2,70,70,300,1",
+                  "Style: Default,Noto Sans Tamil,66,&H00FFFFFF,&H00FFFFFF,&H00000000,&H70000000,-1,0,0,0,100,100,0,0,1,5,1,2,65,65,305,1",
                   "",
                   "[Events]",
-                  "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text"
+                  "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text",
               ]
 
-              chunk_size = 4
+              chunk_size = 3
 
               for index, word in enumerate(words):
                   group_start = (index // chunk_size) * chunk_size
-                  group_end = min(
-                      group_start + chunk_size,
-                      len(words)
-                  )
-
+                  group_end = min(group_start + chunk_size, len(words))
                   group = words[group_start:group_end]
+
                   display_words = []
 
                   for local_index, item in enumerate(group):
@@ -137,140 +150,76 @@ jobs:
                           )
                       else:
                           display_words.append(
-                              r"{\1c&H00FFFFFF&\b1}" +
-                              safe_word
+                              r"{\1c&H00FFFFFF&\b1}" + safe_word
                           )
 
                   caption = " ".join(display_words)
-                  start = word["start"]
+                  start = float(word["start"])
 
                   if index + 1 < len(words):
-                      end = words[index + 1]["start"]
+                      end = max(float(words[index + 1]["start"]), start + 0.08)
                   else:
-                      end = word["end"] + 0.10
-
-                  if end <= start:
-                      end = start + 0.10
+                      end = max(float(word["end"]) + 0.08, start + 0.10)
 
                   lines.append(
-                      f"Dialogue: 0,"
-                      f"{ass_time(start)},"
-                      f"{ass_time(end)},"
-                      f"Default,,0,0,0,,"
-                      f"{{\\an2}}{caption}"
+                      f"Dialogue: 0,{ass_time(start)},{ass_time(end)},"
+                      f"Default,,0,0,0,,{{\\an2}}{caption}"
                   )
 
-              with open(
-                  output_file,
-                  "w",
-                  encoding="utf-8-sig"
-              ) as f:
+              with open(output_file, "w", encoding="utf-8-sig") as f:
                   f.write("\n".join(lines))
-
-          segment_files = []
 
           for i, scene in enumerate(scenes, start=1):
               number = str(i).zfill(2)
-
               video_url = scene.get("video_url")
-              voice_text = scene.get(
-                  "voice_text",
-                  ""
-              ).strip()
+              voice_text = str(scene.get("voice_text", "")).strip()
 
               if not video_url:
-                  raise RuntimeError(
-                      f"Scene {i}: video_url missing"
-                  )
-
+                  raise RuntimeError(f"Scene {i}: video_url missing")
               if not voice_text:
-                  raise RuntimeError(
-                      f"Scene {i}: voice_text missing"
-                  )
+                  raise RuntimeError(f"Scene {i}: voice_text missing")
 
               source_video = f"segments/source_{number}.mp4"
               voice_file = f"segments/voice_{number}.mp3"
-
-              subtitle_file = os.path.abspath(
-                  f"segments/subtitle_{number}.ass"
-              )
-
+              subtitle_file = os.path.abspath(f"segments/subtitle_{number}.ass")
               output_file = f"segments/scene_{number}.mp4"
 
               print("==========================")
               print(f"SCENE {i}")
               print("==========================")
-
               print("Downloading clip...")
 
               subprocess.run([
-                  "curl",
-                  "-L",
-                  "--fail",
-                  "--retry", "3",
-                  "--retry-delay", "2",
-                  video_url,
-                  "-o",
-                  source_video
+                  "curl", "-L", "--fail", "--retry", "3",
+                  "--retry-delay", "2", video_url, "-o", source_video
               ], check=True)
 
-              print("Generating Tamil voice...")
+              print("Generating natural Tamil voice + exact TTS timings...")
+              spoken_text, words = make_voice_with_timings(voice_text, voice_file)
 
-              asyncio.run(
-                  make_voice(
-                      voice_text,
-                      voice_file
-                  )
-              )
+              print("TTS text:", spoken_text)
+              print(f"Scene {i}: {len(words)} TTS word boundaries")
 
-              print("Getting exact word timings...")
+              if not words:
+                  raise RuntimeError(f"Scene {i}: Edge TTS returned no word boundaries")
 
-              words = get_word_timings(
-                  voice_file
-              )
+              create_ass(words, subtitle_file)
 
-              print(
-                  f"Scene {i}: {len(words)} words detected"
-              )
+              duration = float(subprocess.check_output([
+                  "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                  "-of", "default=noprint_wrappers=1:nokey=1", voice_file
+              ]).decode().strip())
 
-              if len(words) == 0:
-                  raise RuntimeError(
-                      f"Scene {i}: Whisper returned no words"
-                  )
-
-              print("Creating green captions...")
-
-              create_ass(
-                  words,
-                  subtitle_file
-              )
-
-              duration = subprocess.check_output([
-                  "ffprobe",
-                  "-v", "error",
-                  "-show_entries",
-                  "format=duration",
-                  "-of",
-                  "default=noprint_wrappers=1:nokey=1",
-                  voice_file
-              ]).decode().strip()
-
-              duration = float(duration)
-
-              print(
-                  f"Voice duration: {duration:.2f}s"
-              )
+              scene_duration = duration + 0.12
+              print(f"Voice duration: {duration:.2f}s")
 
               subtitle_filter = (
-                  f"subtitles='{subtitle_file}':"
-                  "fontsdir='/usr/share/fonts'"
+                  f"subtitles='{subtitle_file}':fontsdir='/usr/share/fonts'"
               )
 
-              # Add a subtle cinematic zoom so stock footage feels less static.
-              # Keep it gentle to avoid motion sickness and preserve caption readability.
               zoom_filter = (
                   "zoompan="
-                  "z='min(zoom+0.0008,1.06)':"
+                  "z='min(zoom+0.0007,1.05)':"
                   "x='iw/2-(iw/zoom/2)':"
                   "y='ih/2-(ih/zoom/2)':"
                   "d=1:"
@@ -279,13 +228,10 @@ jobs:
               )
 
               video_filter = (
-                  "scale=1080:1920:"
-                  "force_original_aspect_ratio=increase,"
+                  "scale=1080:1920:force_original_aspect_ratio=increase,"
                   "crop=1080:1920,"
                   + zoom_filter +
-                  "eq=contrast=1.06:"
-                  "saturation=1.10:"
-                  "brightness=0.01,"
+                  "eq=contrast=1.06:saturation=1.10:brightness=0.01,"
                   + subtitle_filter +
                   ",format=yuv420p"
               )
@@ -293,38 +239,18 @@ jobs:
               print("Rendering scene...")
 
               subprocess.run([
-                  "ffmpeg",
-                  "-y",
-
-                  "-stream_loop", "-1",
-                  "-i", source_video,
-
+                  "ffmpeg", "-y",
+                  "-stream_loop", "-1", "-i", source_video,
                   "-i", voice_file,
-
-                  "-t", str(duration),
-
+                  "-t", str(scene_duration),
                   "-vf", video_filter,
-
-                  "-map", "0:v:0",
-                  "-map", "1:a:0",
-
-                  "-c:v", "libx264",
-                  "-preset", "veryfast",
-                  "-crf", "22",
-
-                  "-c:a", "aac",
-                  "-b:a", "192k",
-                  "-ar", "48000",
-                  "-ac", "2",
-
+                  "-map", "0:v:0", "-map", "1:a:0",
+                  "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+                  "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+                  "-af", "apad=pad_dur=0.12",
                   "-movflags", "+faststart",
-
                   output_file
               ], check=True)
-
-              segment_files.append(
-                  output_file
-              )
 
           print("ALL SCENES RENDERED")
           PY
@@ -370,7 +296,7 @@ jobs:
               )
 
           transition_duration = min(
-              0.25,
+              0.18,
               min(durations) / 3
           )
 
@@ -561,7 +487,7 @@ jobs:
 
           filter_complex = (
               "[1:a]"
-              "volume=0.12,"
+              "volume=0.08,"
               f"atrim=0:{duration},"
               "asetpts=PTS-STARTPTS"
               "[music];"
