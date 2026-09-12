@@ -16,7 +16,7 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg fonts-dejavu-core
+          sudo apt-get install -y ffmpeg fonts-dejavu-core fonts-noto-core fonts-noto-extra
           python3 -m pip install --upgrade edge-tts
           python3 -m pip install openai-whisper
 
@@ -49,7 +49,7 @@ jobs:
           async def make_voice(text, output):
               communicate = edge_tts.Communicate(
                   text=text,
-                  voice="en-US-AriaNeural",
+                  voice="ta-IN-PallaviNeural",
                   rate="+5%"
               )
               await communicate.save(output)
@@ -73,7 +73,7 @@ jobs:
           def get_word_timings(audio_file):
               result = whisper_model.transcribe(
                   audio_file,
-                  language="en",
+                  language="ta",
                   task="transcribe",
                   word_timestamps=True,
                   fp16=False
@@ -107,7 +107,7 @@ jobs:
                   "",
                   "[V4+ Styles]",
                   "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding",
-                  "Style: Default,DejaVu Sans,68,&H00FFFFFF,&H00FFFFFF,&H00000000,&H70000000,-1,0,0,0,100,100,0,0,1,5,1,2,70,70,300,1",
+                  "Style: Default,Noto Sans Tamil,68,&H00FFFFFF,&H00FFFFFF,&H00000000,&H70000000,-1,0,0,0,100,100,0,0,1,5,1,2,70,70,300,1",
                   "",
                   "[Events]",
                   "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text"
@@ -214,7 +214,7 @@ jobs:
                   source_video
               ], check=True)
 
-              print("Generating English voice...")
+              print("Generating Tamil voice...")
 
               asyncio.run(
                   make_voice(
