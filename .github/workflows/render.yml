@@ -35,8 +35,8 @@ jobs:
           import subprocess
           import edge_tts
 
-          TAMIL_VOICE = "ta-IN-ValluvarNeural"
-          TTS_RATE = "+0%"
+          ENGLISH_VOICE = "en-US-AriaNeural"
+          TTS_RATE = "+4%"
           TTS_PITCH = "+0Hz"
           TTS_VOLUME = "+0%"
 
@@ -45,7 +45,7 @@ jobs:
 
           os.makedirs("segments", exist_ok=True)
 
-          def normalize_spoken_tamil(text):
+          def normalize_spoken_english(text):
               text = str(text or "").strip()
               text = text.replace("…", ".")
               text = text.replace("—", ",")
@@ -61,11 +61,11 @@ jobs:
               return float(value) / 10_000_000.0
 
           def make_voice_with_timings(text, output):
-              spoken_text = normalize_spoken_tamil(text)
+              spoken_text = normalize_spoken_english(text)
 
               communicate = edge_tts.Communicate(
                   spoken_text,
-                  voice=TAMIL_VOICE,
+                  voice=ENGLISH_VOICE,
                   rate=TTS_RATE,
                   pitch=TTS_PITCH,
                   volume=TTS_VOLUME,
@@ -92,13 +92,13 @@ jobs:
                           })
 
               if not os.path.exists(output) or os.path.getsize(output) == 0:
-                  raise RuntimeError("Tamil TTS created no audio")
+                  raise RuntimeError("English TTS created no audio")
 
               return spoken_text, words
 
 
           def build_fallback_timings(spoken_text, audio_duration):
-              # Fallback for Tamil when Edge TTS returns audio but no WordBoundary events.
+              # Fallback when Edge TTS returns audio but no WordBoundary events.
               tokens = [t for t in re.split(r"\s+", spoken_text.strip()) if t]
 
               if not tokens:
@@ -108,7 +108,7 @@ jobs:
 
               weights = []
               for token in tokens:
-                  cleaned = re.sub(r"[^\w\u0B80-\u0BFF]", "", token)
+                  cleaned = re.sub(r"[^\w]", "", token)
                   weights.append(max(len(cleaned), 1))
 
               total_weight = sum(weights)
@@ -164,7 +164,7 @@ jobs:
                   "",
                   "[V4+ Styles]",
                   "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding",
-                  "Style: Default,Noto Sans Tamil,66,&H00FFFFFF,&H00FFFFFF,&H00000000,&H70000000,-1,0,0,0,100,100,0,0,1,5,1,2,65,65,305,1",
+                  "Style: Default,Noto Sans,66,&H00FFFFFF,&H00FFFFFF,&H00000000,&H70000000,-1,0,0,0,100,100,0,0,1,5,1,2,65,65,305,1",
                   "",
                   "[Events]",
                   "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text",
@@ -235,7 +235,7 @@ jobs:
                   "--retry-delay", "2", video_url, "-o", source_video
               ], check=True)
 
-              print("Generating natural Tamil voice + exact TTS timings...")
+              print("Generating natural English voice + exact TTS timings...")
               spoken_text, words = make_voice_with_timings(voice_text, voice_file)
 
               print("TTS text:", spoken_text)
