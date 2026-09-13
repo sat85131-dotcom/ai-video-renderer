@@ -1,0 +1,60 @@
+name: Animate Telegram Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_url:
+        description: "AI image URL"
+        required: true
+        type: string
+      resumeUrl:
+        description: "n8n callback URL"
+        required: true
+        type: string
+
+jobs:
+  animate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Download image
+        env:
+          IMAGE_URL: ${{ inputs.image_url }}
+        run: |
+          curl -L --fail "$IMAGE_URL" -o input.jpg
+          file input.jpg
+
+      - name: Create cinematic vertical video
+        run: |
+          ffmpeg -y \
+            -loop 1 \
+            -i input.jpg \
+            -vf "scale=1200:2134:force_original_aspect_ratio=increase,crop=1200:2134,zoompan=z='min(zoom+0.0008,1.12)':x='iw/2-(iw/zoom/2)+sin(on/25)*8':y='ih/2-(ih/zoom/2)+cos(on/30)*8':d=240:s=1080x1920:fps=30,format=yuv420p" \
+            -t 8 \
+            -c:v libx264 \
+            -preset medium \
+            -crf 20 \
+            -movflags +faststart \
+            output.mp4
+
+      - name: Upload video artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: animated-video
+          path: output.mp4
+          retention-days: 1
+
+      - name: Resume n8n
+        if: always()
+        env:
+          RESUME_URL: ${{ inputs.resumeUrl }}
+        run: |
+          curl -X POST \
+            -H "Content-Type: application/json" \
+            -d "{\"status\":\"${{ job.status }}\"}" \
+            "$RESUME_URL"
