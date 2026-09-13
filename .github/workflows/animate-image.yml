@@ -60,19 +60,29 @@ jobs:
 
           done
 
-      - name: Create storytelling voice
+      - name: Create Tamil storytelling voice
         run: |
           jq -r '.narration' payload.json > narration.txt
 
-          echo "Narration:"
+          echo "Tamil narration:"
           cat narration.txt
 
           edge-tts \
-            --voice en-US-AriaNeural \
-            --rate="-5%" \
-            --pitch="-2Hz" \
+            --voice ta-IN-PallaviNeural \
+            --rate="-15%" \
+            --volume="+7%" \
             --text "$(cat narration.txt)" \
-            --write-media narration.mp3
+            --write-media narration_raw.mp3
+
+          echo "Applying deeper storytelling pitch and 48 kHz processing"
+
+          ffmpeg -y \
+            -i narration_raw.mp3 \
+            -af "aresample=48000,asetrate=48000*0.890899,aresample=48000,atempo=1.122462" \
+            -ar 48000 \
+            -c:a libmp3lame \
+            -b:a 192k \
+            narration.mp3
 
           echo "Narration duration:"
 
@@ -80,6 +90,15 @@ jobs:
             -v error \
             -show_entries format=duration \
             -of default=noprint_wrappers=1:nokey=1 \
+            narration.mp3
+
+          echo "Narration audio info:"
+
+          ffprobe \
+            -v error \
+            -select_streams a:0 \
+            -show_entries stream=codec_name,sample_rate,channels,bit_rate \
+            -of default=noprint_wrappers=1 \
             narration.mp3
 
       - name: Create individual scenes
@@ -119,7 +138,7 @@ jobs:
               -vf "
               scale=1080:1920:force_original_aspect_ratio=increase,
               crop=1080:1920,
-              fps=30,
+              fps=24,
               format=yuv420p
               " \
               -an \
@@ -150,7 +169,7 @@ jobs:
             -c copy \
             video_no_audio.mp4
 
-      - name: Add voice and optional BGM
+      - name: Add Tamil narration
         run: |
           TOTAL_DURATION=$(ffprobe \
             -v error \
@@ -167,72 +186,32 @@ jobs:
           echo "Video duration: $TOTAL_DURATION"
           echo "Voice duration: $VOICE_DURATION"
 
-          if [ -f "bgm.mp3" ]; then
-
-            echo "BGM found - mixing narration + BGM"
-
-            ffmpeg -y \
-              -i video_no_audio.mp4 \
-              -i narration.mp3 \
-              -stream_loop -1 \
-              -i bgm.mp3 \
-              -filter_complex "
-              [1:a]
-              volume=1.0,
-              apad,
-              atrim=duration=${TOTAL_DURATION}
-              [voice];
-
-              [2:a]
-              volume=0.06,
-              afade=t=in:st=0:d=2,
-              apad,
-              atrim=duration=${TOTAL_DURATION}
-              [music];
-
-              [voice][music]
-              amix=inputs=2:duration=longest:normalize=0
-              [audio]
-              " \
-              -map 0:v \
-              -map "[audio]" \
-              -t "$TOTAL_DURATION" \
-              -c:v copy \
-              -c:a aac \
-              -b:a 160k \
-              -movflags +faststart \
-              output.mp4
-
-          else
-
-            echo "No bgm.mp3 found - using narration only"
-
-            ffmpeg -y \
-              -i video_no_audio.mp4 \
-              -i narration.mp3 \
-              -filter_complex "
-              [1:a]
-              volume=1.0,
-              apad,
-              atrim=duration=${TOTAL_DURATION}
-              [audio]
-              " \
-              -map 0:v \
-              -map "[audio]" \
-              -t "$TOTAL_DURATION" \
-              -c:v copy \
-              -c:a aac \
-              -b:a 160k \
-              -movflags +faststart \
-              output.mp4
-
-          fi
+          ffmpeg -y \
+            -i video_no_audio.mp4 \
+            -i narration.mp3 \
+            -filter_complex "
+            [1:a]
+            apad,
+            atrim=duration=${TOTAL_DURATION}
+            [audio]
+            " \
+            -map 0:v \
+            -map "[audio]" \
+            -t "$TOTAL_DURATION" \
+            -c:v copy \
+            -c:a aac \
+            -b:a 192k \
+            -ar 48000 \
+            -movflags +faststart \
+            output.mp4
 
       - name: Check final video
         run: |
+          echo "Final video information:"
+
           ffprobe \
             -v error \
-            -show_entries format=duration \
+            -show_entries format=duration,size,bit_rate \
             -show_streams \
             output.mp4
 
