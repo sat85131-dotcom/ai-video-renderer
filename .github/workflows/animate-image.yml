@@ -65,8 +65,9 @@ jobs:
           cat narration.txt
 
           edge-tts \
-            --voice en-US-GuyNeural \
-            --rate="+0%" \
+            --voice en-US-AriaNeural \
+            --rate="-5%" \
+            --pitch="-2Hz" \
             --text "$(cat narration.txt)" \
             --write-media narration.mp3
 
