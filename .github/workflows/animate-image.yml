@@ -42,18 +42,21 @@ jobs:
 
           COUNT=$(jq '.image_urls | length' payload.json)
 
-          echo "Images: $COUNT"
+          echo "Total images: $COUNT"
 
           for i in $(seq 0 $((COUNT - 1))); do
 
             URL=$(jq -r ".image_urls[$i]" payload.json)
+            NUMBER=$((i + 1))
 
-            echo "Downloading scene $((i + 1))"
+            echo "Downloading scene $NUMBER"
 
             curl -L --fail \
               -H "Authorization: Bearer ${{ secrets.POLLINATIONS_API_KEY }}" \
               "$URL" \
-              -o "scenes/scene_$((i + 1)).jpg"
+              -o "scenes/scene_${NUMBER}.jpg"
+
+            file "scenes/scene_${NUMBER}.jpg"
 
           done
 
@@ -71,24 +74,48 @@ jobs:
             --text "$(cat narration.txt)" \
             --write-media narration.mp3
 
+          echo "Narration duration:"
+
+          ffprobe \
+            -v error \
+            -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 \
+            narration.mp3
+
       - name: Create individual scenes
         run: |
           COUNT=$(jq '.scenes | length' payload.json)
 
           mkdir -p clips
 
+          VOICE_DURATION=$(ffprobe \
+            -v error \
+            -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 \
+            narration.mp3)
+
+          echo "Voice duration: $VOICE_DURATION seconds"
+          echo "Scene count: $COUNT"
+
+          PER_SCENE_DURATION=$(awk \
+            -v duration="$VOICE_DURATION" \
+            -v count="$COUNT" \
+            'BEGIN {
+              printf "%.3f", (duration + 1.5) / count
+            }')
+
+          echo "Each scene duration: $PER_SCENE_DURATION seconds"
+
           for i in $(seq 0 $((COUNT - 1))); do
 
             NUMBER=$((i + 1))
 
-            DURATION=$(jq -r ".scenes[$i].duration" payload.json)
-
-            echo "Creating scene $NUMBER - ${DURATION}s"
+            echo "Creating scene $NUMBER"
 
             ffmpeg -y \
               -loop 1 \
               -i "scenes/scene_${NUMBER}.jpg" \
-              -t "$DURATION" \
+              -t "$PER_SCENE_DURATION" \
               -vf "
               scale=1080:1920:force_original_aspect_ratio=increase,
               crop=1080:1920,
@@ -113,6 +140,7 @@ jobs:
             echo "file 'clips/scene_${i}.mp4'" >> concat.txt
           done
 
+          echo "Scene list:"
           cat concat.txt
 
           ffmpeg -y \
@@ -130,11 +158,18 @@ jobs:
             -of default=noprint_wrappers=1:nokey=1 \
             video_no_audio.mp4)
 
+          VOICE_DURATION=$(ffprobe \
+            -v error \
+            -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 \
+            narration.mp3)
+
           echo "Video duration: $TOTAL_DURATION"
+          echo "Voice duration: $VOICE_DURATION"
 
           if [ -f "bgm.mp3" ]; then
 
-            echo "BGM found - mixing voice + music"
+            echo "BGM found - mixing narration + BGM"
 
             ffmpeg -y \
               -i video_no_audio.mp4 \
@@ -149,7 +184,8 @@ jobs:
               [voice];
 
               [2:a]
-              volume=0.08,
+              volume=0.06,
+              afade=t=in:st=0:d=2,
               apad,
               atrim=duration=${TOTAL_DURATION}
               [music];
@@ -169,7 +205,7 @@ jobs:
 
           else
 
-            echo "No bgm.mp3 found - using storytelling voice only"
+            echo "No bgm.mp3 found - using narration only"
 
             ffmpeg -y \
               -i video_no_audio.mp4 \
@@ -191,6 +227,14 @@ jobs:
               output.mp4
 
           fi
+
+      - name: Check final video
+        run: |
+          ffprobe \
+            -v error \
+            -show_entries format=duration \
+            -show_streams \
+            output.mp4
 
       - name: Upload video artifact
         uses: actions/upload-artifact@v4
