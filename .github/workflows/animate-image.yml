@@ -69,7 +69,7 @@ jobs:
 
           edge-tts \
             --voice ta-IN-PallaviNeural \
-            --rate="-15%" \
+            --rate="-5%" \
             --volume="+7%" \
             --text "$(cat narration.txt)" \
             --write-media narration_raw.mp3
