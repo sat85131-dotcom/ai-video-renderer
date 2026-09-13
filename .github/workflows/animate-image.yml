@@ -69,16 +69,16 @@ jobs:
 
           edge-tts \
             --voice ta-IN-PallaviNeural \
-            --rate="-5%" \
-            --volume="+7%" \
+            --rate="+8%" \
+            --volume="+5%" \
             --text "$(cat narration.txt)" \
             --write-media narration_raw.mp3
 
-          echo "Applying deeper storytelling pitch and 48 kHz processing"
+          echo "Processing clean natural Tamil voice"
 
           ffmpeg -y \
             -i narration_raw.mp3 \
-            -af "aresample=48000,asetrate=48000*0.890899,aresample=48000,atempo=1.122462" \
+            -af "aresample=48000" \
             -ar 48000 \
             -c:a libmp3lame \
             -b:a 192k \
