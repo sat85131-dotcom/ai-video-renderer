@@ -125,7 +125,7 @@ jobs:
               -an \
               -c:v libx264 \
               -preset medium \
-              -crf 20 \
+              -crf 24 \
               "clips/scene_${NUMBER}.mp4"
 
           done
