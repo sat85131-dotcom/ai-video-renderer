@@ -26,7 +26,10 @@ jobs:
         env:
           IMAGE_URL: ${{ inputs.image_url }}
         run: |
-          curl -L --fail "$IMAGE_URL" -o input.jpg
+          curl -L --fail \
+            -H "Authorization: Bearer ${{ secrets.POLLINATIONS_API_KEY }}" \
+          "$IMAGE_URL" \
+          -o input.jpg
           file input.jpg
 
       - name: Create cinematic vertical video
