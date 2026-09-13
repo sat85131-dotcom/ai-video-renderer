@@ -33,28 +33,68 @@ jobs:
         run: |
           printf '%s' "$PAYLOAD" > payload.json
 
-          echo "Payload:"
-          jq '.' payload.json
+          echo "Payload received"
 
-      - name: Download scene images
+          jq '{
+            title,
+            narration,
+            music_mood,
+            scene_count: (.scenes | length)
+          }' payload.json
+
+      - name: Generate scene images with Cloudflare
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           mkdir -p scenes
 
-          COUNT=$(jq '.image_urls | length' payload.json)
+          COUNT=$(jq '.scenes | length' payload.json)
 
-          echo "Total images: $COUNT"
+          echo "Total scenes: $COUNT"
+
+          if [ "$COUNT" -eq 0 ]; then
+            echo "No scenes found"
+            exit 1
+          fi
 
           for i in $(seq 0 $((COUNT - 1))); do
 
-            URL=$(jq -r ".image_urls[$i]" payload.json)
             NUMBER=$((i + 1))
 
-            echo "Downloading scene $NUMBER"
+            PROMPT=$(jq -r ".scenes[$i].image_prompt" payload.json)
 
-            curl -L --fail \
-              -H "Authorization: Bearer ${{ secrets.POLLINATIONS_API_KEY }}" \
-              "$URL" \
-              -o "scenes/scene_${NUMBER}.jpg"
+            if [ -z "$PROMPT" ] || [ "$PROMPT" = "null" ]; then
+              echo "Missing image prompt for scene $NUMBER"
+              exit 1
+            fi
+
+            echo "Generating scene $NUMBER of $COUNT"
+
+            jq -n \
+              --arg prompt "$PROMPT" \
+              '{prompt: $prompt}' \
+              > "request_${NUMBER}.json"
+
+            curl -sS --fail \
+              -X POST \
+              "https://api.cloudflare.com/client/v4/accounts/058021d96073d8aa330a8e9348a949ba/ai/run/@cf/black-forest-labs/flux-1-schnell" \
+              -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data @"request_${NUMBER}.json" \
+              -o "response_${NUMBER}.json"
+
+            IMAGE_BASE64=$(jq -r '.result.image // empty' "response_${NUMBER}.json")
+
+            if [ -z "$IMAGE_BASE64" ]; then
+              echo "Cloudflare did not return an image for scene $NUMBER"
+              cat "response_${NUMBER}.json"
+              exit 1
+            fi
+
+            printf '%s' "$IMAGE_BASE64" | base64 --decode \
+              > "scenes/scene_${NUMBER}.jpg"
+
+            echo "Scene $NUMBER generated"
 
             file "scenes/scene_${NUMBER}.jpg"
 
@@ -64,8 +104,7 @@ jobs:
         run: |
           jq -r '.narration' payload.json > narration.txt
 
-          echo "Tamil narration:"
-          cat narration.txt
+          echo "Creating Tamil narration"
 
           edge-tts \
             --voice ta-IN-PallaviNeural \
@@ -73,8 +112,6 @@ jobs:
             --volume="+5%" \
             --text "$(cat narration.txt)" \
             --write-media narration_raw.mp3
-
-          echo "Processing clean natural Tamil voice"
 
           ffmpeg -y \
             -i narration_raw.mp3 \
@@ -90,15 +127,6 @@ jobs:
             -v error \
             -show_entries format=duration \
             -of default=noprint_wrappers=1:nokey=1 \
-            narration.mp3
-
-          echo "Narration audio info:"
-
-          ffprobe \
-            -v error \
-            -select_streams a:0 \
-            -show_entries stream=codec_name,sample_rate,channels,bit_rate \
-            -of default=noprint_wrappers=1 \
             narration.mp3
 
       - name: Create individual scenes
@@ -129,7 +157,7 @@ jobs:
 
             NUMBER=$((i + 1))
 
-            echo "Creating scene $NUMBER"
+            echo "Rendering scene $NUMBER"
 
             ffmpeg -y \
               -loop 1 \
@@ -149,7 +177,7 @@ jobs:
 
           done
 
-      - name: Join scenes back to back
+      - name: Join scenes
         run: |
           rm -f concat.txt
 
@@ -159,7 +187,6 @@ jobs:
             echo "file 'clips/scene_${i}.mp4'" >> concat.txt
           done
 
-          echo "Scene list:"
           cat concat.txt
 
           ffmpeg -y \
@@ -207,7 +234,7 @@ jobs:
 
       - name: Check final video
         run: |
-          echo "Final video information:"
+          echo "Final video information"
 
           ffprobe \
             -v error \
