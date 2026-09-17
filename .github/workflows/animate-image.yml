@@ -24,10 +24,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg jq python3-pip
-          python3 -m pip install --upgrade edge-tts
-
-          echo "Available Tamil voices:"
-          edge-tts --list-voices | grep "ta-IN" || true
+          python3 -m pip install --upgrade google-genai
 
       - name: Read scene data
         env:
@@ -105,7 +102,9 @@ jobs:
             file "scenes/scene_${NUMBER}.jpg"
           done
 
-      - name: Create Tamil narration
+      - name: Create Tamil narration with Gemini TTS
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           jq -r '.narration' payload.json > narration.txt
 
@@ -114,28 +113,107 @@ jobs:
             exit 1
           fi
 
-          echo "Creating Tamil narration"
+          cat > generate_tts.py <<'PYTHON'
+          import os
+          import wave
+          from google import genai
+          from google.genai import types
 
-          edge-tts \
-            --voice "ta-IN-PallaviNeural" \
-            --rate="+0%" \
-            --volume="+0%" \
-            --pitch="+0Hz" \
-            --file narration.txt \
-            --write-media narration_raw.mp3
+          api_key = os.environ.get("GEMINI_API_KEY")
 
-          if [ ! -s narration_raw.mp3 ]; then
-            echo "Tamil voice generation failed"
+          if not api_key:
+              raise RuntimeError("GEMINI_API_KEY is missing")
+
+          with open("narration.txt", "r", encoding="utf-8") as f:
+              narration = f.read().strip()
+
+          if not narration:
+              raise RuntimeError("Narration is empty")
+
+          client = genai.Client(api_key=api_key)
+
+          prompt = f"""
+          Read the following transcript as a warm, natural Tamil female
+          YouTube storyteller.
+
+          Speak in authentic conversational spoken Tamil.
+          Use clear native Tamil pronunciation.
+          Sound friendly, bright, expressive and relaxed.
+          Keep the delivery natural, like a Tamil YouTube creator
+          telling an interesting story to viewers.
+          Avoid a formal newsreader style.
+          Avoid robotic delivery.
+          Pronounce Tamil words naturally.
+          English words appearing in the Tamil transcript should also
+          flow naturally inside the Tamil sentence.
+
+          Transcript:
+          {narration}
+          """
+
+          response = client.models.generate_content(
+              model="gemini-2.5-flash-preview-tts",
+              contents=prompt,
+              config=types.GenerateContentConfig(
+                  temperature=1,
+                  response_modalities=["AUDIO"],
+                  speech_config=types.SpeechConfig(
+                      voice_config=types.VoiceConfig(
+                          prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                              voice_name="Zephyr"
+                          )
+                      )
+                  ),
+              ),
+          )
+
+          audio_data = None
+
+          for candidate in response.candidates or []:
+              if not candidate.content:
+                  continue
+
+              for part in candidate.content.parts or []:
+                  if part.inline_data and part.inline_data.data:
+                      audio_data = part.inline_data.data
+                      break
+
+              if audio_data:
+                  break
+
+          if not audio_data:
+              raise RuntimeError("Gemini TTS returned no audio data")
+
+          with wave.open("narration_raw.wav", "wb") as wav_file:
+              wav_file.setnchannels(1)
+              wav_file.setsampwidth(2)
+              wav_file.setframerate(24000)
+              wav_file.writeframes(audio_data)
+
+          print("Gemini Tamil narration generated successfully")
+          PYTHON
+
+          echo "Creating Tamil narration using Gemini TTS / Zephyr"
+
+          python3 generate_tts.py
+
+          if [ ! -s narration_raw.wav ]; then
+            echo "Gemini Tamil voice generation failed"
             exit 1
           fi
 
           ffmpeg -y \
-            -i narration_raw.mp3 \
+            -i narration_raw.wav \
             -af "aresample=48000,loudnorm=I=-16:LRA=11:TP=-1.5" \
             -ar 48000 \
             -c:a libmp3lame \
             -b:a 192k \
             narration.mp3
+
+          if [ ! -s narration.mp3 ]; then
+            echo "Narration MP3 conversion failed"
+            exit 1
+          fi
 
           VOICE_DURATION=$(ffprobe \
             -v error \
