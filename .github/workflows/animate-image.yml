@@ -42,6 +42,13 @@ jobs:
             scene_count: (.scenes | length)
           }' payload.json
 
+          COUNT=$(jq '.scenes | length' payload.json)
+
+          if [ "$COUNT" -ne 15 ]; then
+            echo "Expected 15 scenes but received $COUNT"
+            exit 1
+          fi
+
       - name: Generate scene images with Cloudflare
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -95,39 +102,51 @@ jobs:
               > "scenes/scene_${NUMBER}.jpg"
 
             echo "Scene $NUMBER generated"
-
             file "scenes/scene_${NUMBER}.jpg"
 
           done
 
-      - name: Create Tamil storytelling voice
+      - name: Create natural spoken Tamil female voice
         run: |
           jq -r '.narration' payload.json > narration.txt
 
-          echo "Creating Tamil narration"
+          if [ ! -s narration.txt ]; then
+            echo "Narration is empty"
+            exit 1
+          fi
+
+          echo "Creating Tamil female narration"
 
           edge-tts \
             --voice ta-IN-PallaviNeural \
-            --rate="+8%" \
-            --volume="+5%" \
+            --rate="+2%" \
+            --volume="+0%" \
+            --pitch="-2Hz" \
             --text "$(cat narration.txt)" \
             --write-media narration_raw.mp3
 
+          if [ ! -s narration_raw.mp3 ]; then
+            echo "Tamil voice generation failed"
+            exit 1
+          fi
+
           ffmpeg -y \
             -i narration_raw.mp3 \
-            -af "aresample=48000" \
+            -af "aresample=48000,loudnorm=I=-16:LRA=11:TP=-1.5" \
             -ar 48000 \
             -c:a libmp3lame \
             -b:a 192k \
             narration.mp3
 
-          echo "Narration duration:"
+          echo "Tamil narration created successfully"
 
-          ffprobe \
+          VOICE_DURATION=$(ffprobe \
             -v error \
             -show_entries format=duration \
             -of default=noprint_wrappers=1:nokey=1 \
-            narration.mp3
+            narration.mp3)
+
+          echo "Narration duration: $VOICE_DURATION seconds"
 
       - name: Create individual scenes
         run: |
@@ -163,12 +182,7 @@ jobs:
               -loop 1 \
               -i "scenes/scene_${NUMBER}.jpg" \
               -t "$PER_SCENE_DURATION" \
-              -vf "
-              scale=1080:1920:force_original_aspect_ratio=increase,
-              crop=1080:1920,
-              fps=24,
-              format=yuv420p
-              " \
+              -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=24,format=yuv420p" \
               -an \
               -c:v libx264 \
               -preset medium \
@@ -186,6 +200,8 @@ jobs:
           for i in $(seq 1 "$COUNT"); do
             echo "file 'clips/scene_${i}.mp4'" >> concat.txt
           done
+
+          echo "Joining all scenes"
 
           cat concat.txt
 
@@ -216,12 +232,7 @@ jobs:
           ffmpeg -y \
             -i video_no_audio.mp4 \
             -i narration.mp3 \
-            -filter_complex "
-            [1:a]
-            apad,
-            atrim=duration=${TOTAL_DURATION}
-            [audio]
-            " \
+            -filter_complex "[1:a]apad,atrim=duration=${TOTAL_DURATION}[audio]" \
             -map 0:v \
             -map "[audio]" \
             -t "$TOTAL_DURATION" \
@@ -234,6 +245,11 @@ jobs:
 
       - name: Check final video
         run: |
+          if [ ! -s output.mp4 ]; then
+            echo "Final video was not created"
+            exit 1
+          fi
+
           echo "Final video information"
 
           ffprobe \
