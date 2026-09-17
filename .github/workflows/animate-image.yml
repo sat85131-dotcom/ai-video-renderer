@@ -7,7 +7,6 @@ on:
         description: "Scene data from n8n"
         required: true
         type: string
-
       resumeUrl:
         description: "n8n callback URL"
         required: true
@@ -25,7 +24,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg jq python3-pip
-          pip install edge-tts
+          python3 -m pip install --upgrade edge-tts
+
+          echo "Available Tamil voices:"
+          edge-tts --list-voices | grep "ta-IN" || true
 
       - name: Read scene data
         env:
@@ -65,9 +67,7 @@ jobs:
           fi
 
           for i in $(seq 0 $((COUNT - 1))); do
-
             NUMBER=$((i + 1))
-
             PROMPT=$(jq -r ".scenes[$i].image_prompt" payload.json)
 
             if [ -z "$PROMPT" ] || [ "$PROMPT" = "null" ]; then
@@ -103,10 +103,9 @@ jobs:
 
             echo "Scene $NUMBER generated"
             file "scenes/scene_${NUMBER}.jpg"
-
           done
 
-      - name: Create natural spoken Tamil female voice
+      - name: Create Tamil narration
         run: |
           jq -r '.narration' payload.json > narration.txt
 
@@ -115,14 +114,14 @@ jobs:
             exit 1
           fi
 
-          echo "Creating Tamil female narration"
+          echo "Creating Tamil narration"
 
           edge-tts \
-            --voice ta-IN-PallaviNeural \
-            --rate="+2%" \
+            --voice "ta-IN-PallaviNeural" \
+            --rate="+0%" \
             --volume="+0%" \
-            --pitch="-2Hz" \
-            --text "$(cat narration.txt)" \
+            --pitch="+0Hz" \
+            --file narration.txt \
             --write-media narration_raw.mp3
 
           if [ ! -s narration_raw.mp3 ]; then
@@ -138,14 +137,13 @@ jobs:
             -b:a 192k \
             narration.mp3
 
-          echo "Tamil narration created successfully"
-
           VOICE_DURATION=$(ffprobe \
             -v error \
             -show_entries format=duration \
             -of default=noprint_wrappers=1:nokey=1 \
             narration.mp3)
 
+          echo "Tamil narration created successfully"
           echo "Narration duration: $VOICE_DURATION seconds"
 
       - name: Create individual scenes
@@ -173,7 +171,6 @@ jobs:
           echo "Each scene duration: $PER_SCENE_DURATION seconds"
 
           for i in $(seq 0 $((COUNT - 1))); do
-
             NUMBER=$((i + 1))
 
             echo "Rendering scene $NUMBER"
@@ -188,7 +185,6 @@ jobs:
               -preset medium \
               -crf 24 \
               "clips/scene_${NUMBER}.mp4"
-
           done
 
       - name: Join scenes
@@ -202,7 +198,6 @@ jobs:
           done
 
           echo "Joining all scenes"
-
           cat concat.txt
 
           ffmpeg -y \
