@@ -48,38 +48,41 @@ jobs:
             exit 1
           fi
 
-      - name: Generate scene images with Cloudflare FLUX + AI Horde fallback
+      - name: Generate HD scene images - Cloudflare + Pollinations fallback
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          POLLINATIONS_API_KEY: ${{ secrets.POLLINATIONS_API_KEY }}
         run: |
           mkdir -p scenes
 
           COUNT=$(jq '.scenes | length' payload.json)
           echo "Total scenes: $COUNT"
 
-          if [ "$COUNT" -eq 0 ]; then
-            echo "No scenes found"
+          if [ "$COUNT" -ne 15 ]; then
+            echo "Expected 15 scenes but received $COUNT"
             exit 1
           fi
 
           for i in $(seq 0 $((COUNT - 1))); do
+
             NUMBER=$((i + 1))
             PROMPT=$(jq -r ".scenes[$i].image_prompt" payload.json)
 
             if [ -z "$PROMPT" ] || [ "$PROMPT" = "null" ]; then
-              echo "Missing image prompt for scene $NUMBER"
+              echo "Missing prompt for scene $NUMBER"
               exit 1
             fi
 
-            ENHANCED_PROMPT="${PROMPT}, cinematic high quality 3D animation, bright natural lighting, vibrant balanced colors, sharp subject, clean detailed textures, professional composition, crisp focus, visually appealing YouTube Shorts style, realistic depth, no text, no watermark"
+            ENHANCED_PROMPT="${PROMPT}. Cinematic premium 3D animated film quality, highly detailed, sharp textures, professional lighting, vibrant natural colors, strong depth, crisp focus, vertical 9:16 composition, main subject centered safely for vertical framing, visually consistent recurring characters, clean background details, professional YouTube Shorts visual, no text, no watermark."
 
-            echo "========================================"
-            echo "Generating scene $NUMBER of $COUNT"
-            echo "========================================"
+            echo "======================================"
+            echo "SCENE $NUMBER / $COUNT"
+            echo "Trying Cloudflare FLUX..."
+            echo "======================================"
 
-            # ------------------------------------------
-            # 1. TRY CLOUDFLARE FLUX FIRST
-            # ------------------------------------------
+            # ==========================================
+            # CLOUDFLARE FIRST
+            # ==========================================
 
             jq -n \
               --arg prompt "$ENHANCED_PROMPT" \
@@ -88,7 +91,7 @@ jobs:
                 steps: 8
               }' > "cf_request_${NUMBER}.json"
 
-            CF_HTTP_CODE=$(curl -sS \
+            CF_CODE=$(curl -sS \
               -o "cf_response_${NUMBER}.json" \
               -w "%{http_code}" \
               -X POST \
@@ -97,172 +100,118 @@ jobs:
               -H "Content-Type: application/json" \
               --data @"cf_request_${NUMBER}.json")
 
-            echo "Cloudflare HTTP code: $CF_HTTP_CODE"
+            echo "Cloudflare HTTP: $CF_CODE"
 
-            CF_SUCCESS="false"
+            USE_CF="false"
 
-            if [ "$CF_HTTP_CODE" = "200" ]; then
-              IMAGE_BASE64=$(jq -r '.result.image // empty' "cf_response_${NUMBER}.json")
+            if [ "$CF_CODE" = "200" ]; then
+
+              IMAGE_BASE64=$(jq -r \
+                '.result.image // empty' \
+                "cf_response_${NUMBER}.json")
 
               if [ -n "$IMAGE_BASE64" ]; then
-                printf '%s' "$IMAGE_BASE64" | base64 --decode \
-                  > "scenes/scene_${NUMBER}_raw.jpg"
 
-                if [ -s "scenes/scene_${NUMBER}_raw.jpg" ]; then
-                  CF_SUCCESS="true"
-                  echo "Cloudflare scene $NUMBER generated successfully"
+                printf '%s' "$IMAGE_BASE64" \
+                  | base64 --decode \
+                  > "scenes/scene_${NUMBER}_source.jpg"
+
+                if [ -s "scenes/scene_${NUMBER}_source.jpg" ]; then
+                  USE_CF="true"
+                  echo "Cloudflare SUCCESS"
                 fi
+
               fi
             fi
 
-            # ------------------------------------------
-            # 2. FALLBACK TO AI HORDE
-            # ------------------------------------------
+            # ==========================================
+            # POLLINATIONS HD FALLBACK
+            # ==========================================
 
-            if [ "$CF_SUCCESS" != "true" ]; then
-              echo "Cloudflare unavailable for scene $NUMBER"
-              echo "Switching to AI Horde fallback..."
+            if [ "$USE_CF" != "true" ]; then
 
-              cat "cf_response_${NUMBER}.json" || true
+              echo "Cloudflare unavailable/quota exhausted."
+              echo "Using Pollinations HD fallback..."
+
+              if [ -z "$POLLINATIONS_API_KEY" ]; then
+                echo "POLLINATIONS_API_KEY secret missing"
+                exit 1
+              fi
 
               jq -n \
                 --arg prompt "$ENHANCED_PROMPT" \
                 '{
+                  model: "black-forest-labs/flux.1-schnell",
                   prompt: $prompt,
-                  params: {
-                    width: 512,
-                    height: 512,
-                    steps: 20,
-                    cfg_scale: 7,
-                    sampler_name: "k_euler_a",
-                    n: 1
-                  }
-                }' > "horde_request_${NUMBER}.json"
+                  n: 1,
+                  size: "1080x1920",
+                  quality: "hd",
+                  response_format: "b64_json"
+                }' > "pollinations_request_${NUMBER}.json"
 
-              HORDE_HTTP_CODE=$(curl -sS \
-                -o "horde_submit_${NUMBER}.json" \
+              POLL_CODE=$(curl -sS \
+                -o "pollinations_response_${NUMBER}.json" \
                 -w "%{http_code}" \
                 -X POST \
-                "https://aihorde.net/api/v2/generate/async" \
-                -H "accept: application/json" \
-                -H "apikey: 0000000000" \
-                -H "Client-Agent: RSK-ON-LIVE:1.0:github-actions" \
+                "https://gen.pollinations.ai/v1/images/generations" \
+                -H "Authorization: Bearer ${POLLINATIONS_API_KEY}" \
                 -H "Content-Type: application/json" \
-                --data @"horde_request_${NUMBER}.json")
+                --data @"pollinations_request_${NUMBER}.json")
 
-              echo "AI Horde HTTP code: $HORDE_HTTP_CODE"
+              echo "Pollinations HTTP: $POLL_CODE"
 
-              if [ "$HORDE_HTTP_CODE" != "202" ]; then
-                echo "AI Horde rejected scene $NUMBER"
-                cat "horde_submit_${NUMBER}.json"
+              if [ "$POLL_CODE" != "200" ]; then
+                echo "Pollinations failed for scene $NUMBER"
+                cat "pollinations_response_${NUMBER}.json"
                 exit 1
               fi
 
-              REQUEST_ID=$(jq -r '.id // empty' "horde_submit_${NUMBER}.json")
+              POLL_IMAGE=$(jq -r \
+                '.data[0].b64_json // empty' \
+                "pollinations_response_${NUMBER}.json")
 
-              if [ -z "$REQUEST_ID" ]; then
-                echo "AI Horde did not return request ID"
-                cat "horde_submit_${NUMBER}.json"
+              if [ -z "$POLL_IMAGE" ]; then
+                echo "Pollinations returned no image"
+                cat "pollinations_response_${NUMBER}.json"
                 exit 1
               fi
 
-              echo "AI Horde Request ID: $REQUEST_ID"
+              printf '%s' "$POLL_IMAGE" \
+                | base64 --decode \
+                > "scenes/scene_${NUMBER}_source.jpg"
 
-              DONE="false"
-              FAULTED="false"
-
-              for ATTEMPT in $(seq 1 60); do
-                sleep 10
-
-                curl -sS \
-                  "https://aihorde.net/api/v2/generate/check/${REQUEST_ID}" \
-                  -H "accept: application/json" \
-                  -H "Client-Agent: RSK-ON-LIVE:1.0:github-actions" \
-                  -o "horde_check_${NUMBER}.json"
-
-                DONE=$(jq -r '.done // false' "horde_check_${NUMBER}.json")
-                FAULTED=$(jq -r '.faulted // false' "horde_check_${NUMBER}.json")
-                WAITING=$(jq -r '.waiting // 0' "horde_check_${NUMBER}.json")
-                PROCESSING=$(jq -r '.processing // 0' "horde_check_${NUMBER}.json")
-
-                echo "AI Horde attempt $ATTEMPT/60"
-                echo "Done: $DONE"
-                echo "Waiting: $WAITING"
-                echo "Processing: $PROCESSING"
-
-                if [ "$FAULTED" = "true" ]; then
-                  echo "AI Horde generation faulted"
-                  cat "horde_check_${NUMBER}.json"
-                  exit 1
-                fi
-
-                if [ "$DONE" = "true" ]; then
-                  break
-                fi
-              done
-
-              if [ "$DONE" != "true" ]; then
-                echo "AI Horde timeout for scene $NUMBER"
+              if [ ! -s "scenes/scene_${NUMBER}_source.jpg" ]; then
+                echo "Pollinations image decode failed"
                 exit 1
               fi
 
-              curl -sS \
-                "https://aihorde.net/api/v2/generate/status/${REQUEST_ID}" \
-                -H "accept: application/json" \
-                -H "Client-Agent: RSK-ON-LIVE:1.0:github-actions" \
-                -o "horde_status_${NUMBER}.json"
+              echo "Pollinations HD SUCCESS"
 
-              IMAGE_URL=$(jq -r \
-                '.generations[0].img // empty' \
-                "horde_status_${NUMBER}.json")
-
-              if [ -z "$IMAGE_URL" ]; then
-                echo "AI Horde returned no image"
-                cat "horde_status_${NUMBER}.json"
-                exit 1
-              fi
-
-              curl -L -sS --fail \
-                "$IMAGE_URL" \
-                -o "scenes/scene_${NUMBER}_raw.webp"
-
-              if [ ! -s "scenes/scene_${NUMBER}_raw.webp" ]; then
-                echo "AI Horde image download failed"
-                exit 1
-              fi
-
-              echo "AI Horde scene $NUMBER generated successfully"
             fi
 
-            # ------------------------------------------
-            # 3. CREATE FINAL 1080x1920 IMAGE
-            # ------------------------------------------
-
-            if [ "$CF_SUCCESS" = "true" ]; then
-              SOURCE_FILE="scenes/scene_${NUMBER}_raw.jpg"
-            else
-              SOURCE_FILE="scenes/scene_${NUMBER}_raw.webp"
-            fi
+            # ==========================================
+            # FINAL 1080x1920 NORMALIZATION
+            # ==========================================
 
             ffmpeg -y \
-              -i "$SOURCE_FILE" \
-              -vf "scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,crop=1080:1920,unsharp=5:5:0.5:5:5:0.0" \
+              -i "scenes/scene_${NUMBER}_source.jpg" \
+              -vf "scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,crop=1080:1920" \
               -q:v 1 \
               "scenes/scene_${NUMBER}.jpg"
 
             if [ ! -s "scenes/scene_${NUMBER}.jpg" ]; then
-              echo "Final conversion failed for scene $NUMBER"
+              echo "Final image processing failed"
               exit 1
             fi
 
-            echo "Scene $NUMBER READY"
+            echo "Scene $NUMBER READY:"
             file "scenes/scene_${NUMBER}.jpg"
 
           done
 
-          echo "========================================"
-          echo "ALL $COUNT SCENES GENERATED"
-          echo "========================================"
+          echo "======================================"
+          echo "ALL 15 HD SCENES READY"
+          echo "======================================"
           
       - name: Create Tamil narration with Gemini TTS
         env:
