@@ -48,10 +48,9 @@ jobs:
             exit 1
           fi
 
-      - name: Generate HD scene images - Cloudflare + Pollinations fallback
+      - name: Generate HD scene images with Cloudflare FLUX
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          POLLINATIONS_API_KEY: ${{ secrets.POLLINATIONS_API_KEY }}
         run: |
           mkdir -p scenes
 
@@ -69,20 +68,16 @@ jobs:
             PROMPT=$(jq -r ".scenes[$i].image_prompt" payload.json)
 
             if [ -z "$PROMPT" ] || [ "$PROMPT" = "null" ]; then
-              echo "Missing prompt for scene $NUMBER"
+              echo "Missing image prompt for scene $NUMBER"
               exit 1
             fi
 
-            ENHANCED_PROMPT="${PROMPT}. Cinematic premium 3D animated film quality, highly detailed, sharp textures, professional lighting, vibrant natural colors, strong depth, crisp focus, vertical 9:16 composition, main subject centered safely for vertical framing, visually consistent recurring characters, clean background details, professional YouTube Shorts visual, no text, no watermark."
+            ENHANCED_PROMPT="${PROMPT}. Cinematic premium 3D animated film quality, highly detailed, sharp textures, professional lighting, vibrant natural colors, strong depth, crisp focus, vertical 9:16 composition, main subject centered safely for vertical framing, visually consistent recurring characters, clean detailed environment, professional YouTube Shorts visual, no text, no watermark."
 
             echo "======================================"
             echo "SCENE $NUMBER / $COUNT"
-            echo "Trying Cloudflare FLUX..."
+            echo "Generating with Cloudflare FLUX..."
             echo "======================================"
-
-            # ==========================================
-            # CLOUDFLARE FIRST
-            # ==========================================
 
             jq -n \
               --arg prompt "$ENHANCED_PROMPT" \
@@ -91,7 +86,7 @@ jobs:
                 steps: 8
               }' > "cf_request_${NUMBER}.json"
 
-            CF_CODE=$(curl -sS \
+            HTTP_CODE=$(curl -sS \
               -o "cf_response_${NUMBER}.json" \
               -w "%{http_code}" \
               -X POST \
@@ -100,98 +95,33 @@ jobs:
               -H "Content-Type: application/json" \
               --data @"cf_request_${NUMBER}.json")
 
-            echo "Cloudflare HTTP: $CF_CODE"
+            echo "Cloudflare HTTP: $HTTP_CODE"
 
-            USE_CF="false"
-
-            if [ "$CF_CODE" = "200" ]; then
-
-              IMAGE_BASE64=$(jq -r \
-                '.result.image // empty' \
-                "cf_response_${NUMBER}.json")
-
-              if [ -n "$IMAGE_BASE64" ]; then
-
-                printf '%s' "$IMAGE_BASE64" \
-                  | base64 --decode \
-                  > "scenes/scene_${NUMBER}_source.jpg"
-
-                if [ -s "scenes/scene_${NUMBER}_source.jpg" ]; then
-                  USE_CF="true"
-                  echo "Cloudflare SUCCESS"
-                fi
-
-              fi
+            if [ "$HTTP_CODE" != "200" ]; then
+              echo "Cloudflare image generation failed."
+              echo "Cloudflare response:"
+              cat "cf_response_${NUMBER}.json"
+              exit 1
             fi
 
-            # ==========================================
-            # POLLINATIONS HD FALLBACK
-            # ==========================================
+            IMAGE_BASE64=$(jq -r \
+              '.result.image // empty' \
+              "cf_response_${NUMBER}.json")
 
-            if [ "$USE_CF" != "true" ]; then
-
-              echo "Cloudflare unavailable/quota exhausted."
-              echo "Using Pollinations HD fallback..."
-
-              if [ -z "$POLLINATIONS_API_KEY" ]; then
-                echo "POLLINATIONS_API_KEY secret missing"
-                exit 1
-              fi
-
-              jq -n \
-                --arg prompt "$ENHANCED_PROMPT" \
-                '{
-                  model: "black-forest-labs/flux.1-schnell",
-                  prompt: $prompt,
-                  n: 1,
-                  size: "1080x1920",
-                  quality: "hd",
-                  response_format: "b64_json"
-                }' > "pollinations_request_${NUMBER}.json"
-
-              POLL_CODE=$(curl -sS \
-                -o "pollinations_response_${NUMBER}.json" \
-                -w "%{http_code}" \
-                -X POST \
-                "https://gen.pollinations.ai/v1/images/generations" \
-                -H "Authorization: Bearer ${POLLINATIONS_API_KEY}" \
-                -H "Content-Type: application/json" \
-                --data @"pollinations_request_${NUMBER}.json")
-
-              echo "Pollinations HTTP: $POLL_CODE"
-
-              if [ "$POLL_CODE" != "200" ]; then
-                echo "Pollinations failed for scene $NUMBER"
-                cat "pollinations_response_${NUMBER}.json"
-                exit 1
-              fi
-
-              POLL_IMAGE=$(jq -r \
-                '.data[0].b64_json // empty' \
-                "pollinations_response_${NUMBER}.json")
-
-              if [ -z "$POLL_IMAGE" ]; then
-                echo "Pollinations returned no image"
-                cat "pollinations_response_${NUMBER}.json"
-                exit 1
-              fi
-
-              printf '%s' "$POLL_IMAGE" \
-                | base64 --decode \
-                > "scenes/scene_${NUMBER}_source.jpg"
-
-              if [ ! -s "scenes/scene_${NUMBER}_source.jpg" ]; then
-                echo "Pollinations image decode failed"
-                exit 1
-              fi
-
-              echo "Pollinations HD SUCCESS"
-
+            if [ -z "$IMAGE_BASE64" ]; then
+              echo "Cloudflare returned no image for scene $NUMBER"
+              cat "cf_response_${NUMBER}.json"
+              exit 1
             fi
 
-            # ==========================================
-            # FINAL 1080x1920 NORMALIZATION
-            # ==========================================
+            printf '%s' "$IMAGE_BASE64" \
+              | base64 --decode \
+              > "scenes/scene_${NUMBER}_source.jpg"
+
+            if [ ! -s "scenes/scene_${NUMBER}_source.jpg" ]; then
+              echo "Image decode failed for scene $NUMBER"
+              exit 1
+            fi
 
             ffmpeg -y \
               -i "scenes/scene_${NUMBER}_source.jpg" \
@@ -200,17 +130,17 @@ jobs:
               "scenes/scene_${NUMBER}.jpg"
 
             if [ ! -s "scenes/scene_${NUMBER}.jpg" ]; then
-              echo "Final image processing failed"
+              echo "Final image processing failed for scene $NUMBER"
               exit 1
             fi
 
-            echo "Scene $NUMBER READY:"
+            echo "Scene $NUMBER READY"
             file "scenes/scene_${NUMBER}.jpg"
 
           done
 
           echo "======================================"
-          echo "ALL 15 HD SCENES READY"
+          echo "ALL 15 CLOUDFLARE SCENES READY"
           echo "======================================"
           
       - name: Create Tamil narration with Gemini TTS
