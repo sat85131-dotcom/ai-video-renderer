@@ -72,93 +72,112 @@ jobs:
               exit 1
             fi
 
-            ENHANCED_PROMPT="${PROMPT}. Cinematic premium 3D animated film quality, highly detailed, sharp textures, professional lighting, vibrant natural colors, strong depth, crisp focus, vertical 9:16 composition, main subject centered safely for vertical framing, visually consistent recurring characters, clean detailed environment, family-friendly, non-graphic, no text, no watermark."
-
             echo "======================================"
             echo "SCENE $NUMBER / $COUNT"
-            echo "Generating with Cloudflare FLUX..."
             echo "======================================"
 
-            # ---------- FIRST ATTEMPT ----------
+            # ---------------------------------------
+            # ATTEMPT 1 - ORIGINAL SAFE ENHANCEMENT
+            # ---------------------------------------
+
+            NORMAL_PROMPT="${PROMPT}. Family-friendly cinematic 3D animated film scene. Non-graphic and age-appropriate. Premium animation quality, highly detailed textures, professional cinematic lighting, vibrant natural colors, crisp focus, strong depth, vertical composition, centered subject, no text, no watermark."
 
             jq -n \
-              --arg prompt "$ENHANCED_PROMPT" \
+              --arg prompt "$NORMAL_PROMPT" \
               '{
                 prompt: $prompt,
                 steps: 8
-              }' > "cf_request_${NUMBER}.json"
+              }' > "request_${NUMBER}.json"
 
             HTTP_CODE=$(curl -sS \
-              -o "cf_response_${NUMBER}.json" \
+              -o "response_${NUMBER}.json" \
               -w "%{http_code}" \
               -X POST \
               "https://api.cloudflare.com/client/v4/accounts/058021d96073d8aa330a8e9348a949ba/ai/run/@cf/black-forest-labs/flux-1-schnell" \
               -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
               -H "Content-Type: application/json" \
-              --data @"cf_request_${NUMBER}.json")
+              --data @"request_${NUMBER}.json")
 
-            echo "Cloudflare HTTP: $HTTP_CODE"
+            echo "First attempt HTTP: $HTTP_CODE"
 
-            # ---------- SAFE RETRY IF NSFW BLOCK ----------
+            # ---------------------------------------
+            # SAFETY FAILURE DETECTION
+            # ---------------------------------------
 
             if [ "$HTTP_CODE" != "200" ]; then
 
-              RESPONSE_TEXT=$(cat "cf_response_${NUMBER}.json")
+              RESPONSE=$(cat "response_${NUMBER}.json")
 
-              if echo "$RESPONSE_TEXT" | grep -qiE \
+              if echo "$RESPONSE" | grep -qiE \
                 'NSFW|8007|unsafe|safety'; then
 
-                echo "Scene $NUMBER blocked by safety filter."
-                echo "Retrying with neutral family-friendly prompt..."
+                echo "Safety filter triggered on scene $NUMBER."
+                echo "Original prompt will NOT be reused."
+                echo "Generating neutral replacement scene..."
 
-                SAFE_PROMPT="Create a family-friendly cinematic 3D animated scene based only on this general theme: ${PROMPT}. Remove or avoid any sexual content, nudity, graphic violence, injuries, blood, weapons, disturbing imagery, dangerous acts, or other mature material. Show only a harmless, non-graphic, age-appropriate visual interpretation. Premium animated film quality, highly detailed environment, professional lighting, vibrant natural colors, crisp focus, strong depth, vertical 9:16 composition, centered main subject, no text, no watermark."
+                # IMPORTANT:
+                # Original PROMPT is deliberately NOT included here.
+                # This prevents the same blocked words/content
+                # from reaching Cloudflare again.
+
+                SAFE_PROMPT="A completely safe family-friendly cinematic 3D animated transition scene for an educational YouTube story. Show a peaceful atmospheric environment with warm cinematic lighting, expressive visual storytelling, beautiful detailed surroundings, vibrant natural colors, premium animated movie quality, crisp sharp focus, strong depth, harmless age-appropriate imagery, vertical composition with the main visual centered, no people in danger, no violence, no injury, no blood, no weapons, no mature content, no text, no watermark."
 
                 jq -n \
                   --arg prompt "$SAFE_PROMPT" \
                   '{
                     prompt: $prompt,
                     steps: 8
-                  }' > "cf_safe_request_${NUMBER}.json"
+                  }' > "safe_request_${NUMBER}.json"
 
-                HTTP_CODE=$(curl -sS \
-                  -o "cf_safe_response_${NUMBER}.json" \
+                SAFE_HTTP=$(curl -sS \
+                  -o "safe_response_${NUMBER}.json" \
                   -w "%{http_code}" \
                   -X POST \
                   "https://api.cloudflare.com/client/v4/accounts/058021d96073d8aa330a8e9348a949ba/ai/run/@cf/black-forest-labs/flux-1-schnell" \
                   -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
                   -H "Content-Type: application/json" \
-                  --data @"cf_safe_request_${NUMBER}.json")
+                  --data @"safe_request_${NUMBER}.json")
 
-                echo "Safe retry HTTP: $HTTP_CODE"
+                echo "Neutral replacement HTTP: $SAFE_HTTP"
 
-                if [ "$HTTP_CODE" = "200" ]; then
-                  cp "cf_safe_response_${NUMBER}.json" \
-                     "cf_response_${NUMBER}.json"
-                  echo "Safe retry SUCCESS"
+                if [ "$SAFE_HTTP" = "200" ]; then
+
+                  cp "safe_response_${NUMBER}.json" \
+                     "response_${NUMBER}.json"
+
+                  HTTP_CODE="200"
+
+                  echo "Neutral replacement SUCCESS"
+
                 else
-                  echo "Safe retry also failed."
-                  cat "cf_safe_response_${NUMBER}.json"
+
+                  echo "Neutral replacement failed."
+                  cat "safe_response_${NUMBER}.json"
                   exit 1
+
                 fi
 
               else
 
-                echo "Cloudflare failed for a reason other than safety."
-                cat "cf_response_${NUMBER}.json"
+                echo "Cloudflare failed for a non-safety reason."
+                cat "response_${NUMBER}.json"
                 exit 1
 
               fi
+
             fi
 
-            # ---------- EXTRACT IMAGE ----------
+            # ---------------------------------------
+            # EXTRACT IMAGE
+            # ---------------------------------------
 
             IMAGE_BASE64=$(jq -r \
               '.result.image // empty' \
-              "cf_response_${NUMBER}.json")
+              "response_${NUMBER}.json")
 
             if [ -z "$IMAGE_BASE64" ]; then
-              echo "Cloudflare returned no image for scene $NUMBER"
-              cat "cf_response_${NUMBER}.json"
+              echo "No image returned for scene $NUMBER"
+              cat "response_${NUMBER}.json"
               exit 1
             fi
 
@@ -171,7 +190,9 @@ jobs:
               exit 1
             fi
 
-            # ---------- FINAL 1080x1920 ----------
+            # ---------------------------------------
+            # FINAL HD VERTICAL IMAGE
+            # ---------------------------------------
 
             ffmpeg -y \
               -i "scenes/scene_${NUMBER}_source.jpg" \
@@ -184,16 +205,16 @@ jobs:
               exit 1
             fi
 
-            echo "Scene $NUMBER READY"
-            file "scenes/scene_${NUMBER}.jpg"
+            echo "SCENE $NUMBER READY"
 
           done
 
           echo "======================================"
-          echo "ALL 15 CLOUDFLARE SCENES READY"
-          echo "======================================"          
-      - name: Create Tamil narration with Gemini TTS
-        env:
+          echo "ALL 15 SCENES GENERATED SUCCESSFULLY"
+          echo "======================================"
+          
+          - name: Create Tamil narration with Gemini TTS
+         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           jq -r '.narration' payload.json > narration.txt
