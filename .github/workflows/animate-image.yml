@@ -76,8 +76,8 @@ jobs:
               '{
                 prompt: $prompt,
                 params: {
-                  width: 576,
-                  height: 1024,
+                  width: 512,
+                  height: 704,
                   steps: 30,
                   cfg_scale: 7.0,
                   sampler_name: "k_euler_a",
