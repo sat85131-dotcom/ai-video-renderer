@@ -55,6 +55,7 @@ jobs:
           mkdir -p scenes
 
           COUNT=$(jq '.scenes | length' payload.json)
+
           echo "Total scenes: $COUNT"
 
           if [ "$COUNT" -ne 15 ]; then
@@ -76,11 +77,7 @@ jobs:
             echo "SCENE $NUMBER / $COUNT"
             echo "======================================"
 
-            # ---------------------------------------
-            # ATTEMPT 1 - ORIGINAL SAFE ENHANCEMENT
-            # ---------------------------------------
-
-            NORMAL_PROMPT="${PROMPT}. Family-friendly cinematic 3D animated film scene. Non-graphic and age-appropriate. Premium animation quality, highly detailed textures, professional cinematic lighting, vibrant natural colors, crisp focus, strong depth, vertical composition, centered subject, no text, no watermark."
+            NORMAL_PROMPT="${PROMPT}. Family-friendly cinematic 3D animated film scene. Non-graphic and age-appropriate. Premium animation quality, highly detailed textures, professional cinematic lighting, vibrant natural colors, crisp focus, strong depth, vertical-friendly composition, centered main subject, no text, no watermark."
 
             jq -n \
               --arg prompt "$NORMAL_PROMPT" \
@@ -100,27 +97,17 @@ jobs:
 
             echo "First attempt HTTP: $HTTP_CODE"
 
-            # ---------------------------------------
-            # SAFETY FAILURE DETECTION
-            # ---------------------------------------
-
             if [ "$HTTP_CODE" != "200" ]; then
 
               RESPONSE=$(cat "response_${NUMBER}.json")
 
-              if echo "$RESPONSE" | grep -qiE \
-                'NSFW|8007|unsafe|safety'; then
+              if echo "$RESPONSE" | grep -qiE 'NSFW|8007|unsafe|safety'; then
 
-                echo "Safety filter triggered on scene $NUMBER."
-                echo "Original prompt will NOT be reused."
-                echo "Generating neutral replacement scene..."
+                echo "Safety filter triggered on scene $NUMBER"
+                echo "Original prompt will NOT be reused"
+                echo "Generating completely neutral replacement"
 
-                # IMPORTANT:
-                # Original PROMPT is deliberately NOT included here.
-                # This prevents the same blocked words/content
-                # from reaching Cloudflare again.
-
-                SAFE_PROMPT="A completely safe family-friendly cinematic 3D animated transition scene for an educational YouTube story. Show a peaceful atmospheric environment with warm cinematic lighting, expressive visual storytelling, beautiful detailed surroundings, vibrant natural colors, premium animated movie quality, crisp sharp focus, strong depth, harmless age-appropriate imagery, vertical composition with the main visual centered, no people in danger, no violence, no injury, no blood, no weapons, no mature content, no text, no watermark."
+                SAFE_PROMPT="A peaceful family-friendly cinematic 3D animated landscape for an educational YouTube story. Beautiful atmospheric environment, warm cinematic lighting, colorful detailed surroundings, premium animated movie quality, crisp sharp focus, strong depth, harmless age-appropriate imagery, vertical-friendly composition, centered visual subject, calm positive atmosphere, no text, no watermark."
 
                 jq -n \
                   --arg prompt "$SAFE_PROMPT" \
@@ -141,42 +128,32 @@ jobs:
                 echo "Neutral replacement HTTP: $SAFE_HTTP"
 
                 if [ "$SAFE_HTTP" = "200" ]; then
-
                   cp "safe_response_${NUMBER}.json" \
                      "response_${NUMBER}.json"
 
                   HTTP_CODE="200"
 
                   echo "Neutral replacement SUCCESS"
-
                 else
-
-                  echo "Neutral replacement failed."
+                  echo "Neutral replacement failed"
                   cat "safe_response_${NUMBER}.json"
                   exit 1
-
                 fi
 
               else
-
-                echo "Cloudflare failed for a non-safety reason."
+                echo "Cloudflare failed for a non-safety reason"
                 cat "response_${NUMBER}.json"
                 exit 1
-
               fi
 
             fi
-
-            # ---------------------------------------
-            # EXTRACT IMAGE
-            # ---------------------------------------
 
             IMAGE_BASE64=$(jq -r \
               '.result.image // empty' \
               "response_${NUMBER}.json")
 
             if [ -z "$IMAGE_BASE64" ]; then
-              echo "No image returned for scene $NUMBER"
+              echo "Cloudflare returned no image for scene $NUMBER"
               cat "response_${NUMBER}.json"
               exit 1
             fi
@@ -189,10 +166,6 @@ jobs:
               echo "Image decode failed for scene $NUMBER"
               exit 1
             fi
-
-            # ---------------------------------------
-            # FINAL HD VERTICAL IMAGE
-            # ---------------------------------------
 
             ffmpeg -y \
               -i "scenes/scene_${NUMBER}_source.jpg" \
@@ -212,9 +185,9 @@ jobs:
           echo "======================================"
           echo "ALL 15 SCENES GENERATED SUCCESSFULLY"
           echo "======================================"
-          
-          - name: Create Tamil narration with Gemini TTS
-         env:
+
+      - name: Create Tamil narration with Gemini TTS
+        env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           jq -r '.narration' payload.json > narration.txt
