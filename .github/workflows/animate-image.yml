@@ -1,53 +1,3 @@
-name: Animate Telegram Image
-
-on:
-  workflow_dispatch:
-    inputs:
-      payload:
-        description: "Scene data from n8n"
-        required: true
-        type: string
-      resumeUrl:
-        description: "n8n callback URL"
-        required: true
-        type: string
-
-jobs:
-  animate:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: Install tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg jq python3-pip
-          python3 -m pip install --upgrade google-genai
-
-      - name: Read scene data
-        env:
-          PAYLOAD: ${{ inputs.payload }}
-        run: |
-          printf '%s' "$PAYLOAD" > payload.json
-
-          echo "Payload received"
-
-          jq '{
-            title,
-            narration,
-            music_mood,
-            scene_count: (.scenes | length)
-          }' payload.json
-
-          COUNT=$(jq '.scenes | length' payload.json)
-
-          if [ "$COUNT" -ne 15 ]; then
-            echo "Expected 15 scenes but received $COUNT"
-            exit 1
-          fi
-
       - name: Generate scene images with AI Horde
         run: |
           mkdir -p scenes
@@ -70,18 +20,23 @@ jobs:
               exit 1
             fi
 
+            # Improve prompt for clean, bright vertical YouTube visuals
+            ENHANCED_PROMPT="${PROMPT}, high quality cinematic 3D animation, bright clean lighting, vibrant natural colors, sharp detailed subject, professional composition, vertical portrait framing, high contrast, crisp focus, detailed textures, polished YouTube Shorts visual, no text, no watermark ### blurry, dull, dark, low quality, low resolution, distorted face, deformed hands, extra fingers, creepy face, horror, oversaturated, noisy, grainy"
+
             echo "========================================"
             echo "Submitting AI Horde scene $NUMBER of $COUNT"
             echo "========================================"
 
             jq -n \
-              --arg prompt "$PROMPT" \
+              --arg prompt "$ENHANCED_PROMPT" \
               '{
                 prompt: $prompt,
                 params: {
-                  width: 512,
-                  height: 512,
-                  steps: 20,
+                  width: 576,
+                  height: 1024,
+                  steps: 30,
+                  cfg_scale: 7.5,
+                  sampler_name: "k_euler_a",
                   n: 1
                 }
               }' > "request_${NUMBER}.json"
@@ -191,9 +146,11 @@ jobs:
               exit 1
             fi
 
+            # High-quality JPEG conversion
             ffmpeg -y \
               -i "scenes/scene_${NUMBER}.webp" \
-              -q:v 2 \
+              -vf "scale=1080:1920:flags=lanczos,unsharp=5:5:0.7:5:5:0.0" \
+              -q:v 1 \
               "scenes/scene_${NUMBER}.jpg"
 
             if [ ! -s "scenes/scene_${NUMBER}.jpg" ]; then
@@ -204,249 +161,3 @@ jobs:
             echo "Scene $NUMBER ready"
             file "scenes/scene_${NUMBER}.jpg"
           done
-
-      - name: Create Tamil narration with Gemini TTS
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: |
-          jq -r '.narration' payload.json > narration.txt
-
-          if [ ! -s narration.txt ]; then
-            echo "Narration is empty"
-            exit 1
-          fi
-
-          cat > generate_tts.py <<'PYTHON'
-          import os
-          import wave
-          from google import genai
-          from google.genai import types
-
-          api_key = os.environ.get("GEMINI_API_KEY")
-
-          if not api_key:
-              raise RuntimeError("GEMINI_API_KEY is missing")
-
-          with open("narration.txt", "r", encoding="utf-8") as f:
-              narration = f.read().strip()
-
-          if not narration:
-              raise RuntimeError("Narration is empty")
-
-          client = genai.Client(api_key=api_key)
-
-          prompt = f"""
-          Read the following transcript as a warm, natural Tamil female
-          YouTube storyteller.
-
-          Speak in authentic conversational spoken Tamil.
-          Use clear native Tamil pronunciation.
-          Sound friendly, bright, expressive and relaxed.
-          Keep the delivery natural, like a Tamil YouTube creator
-          telling an interesting story to viewers.
-          Avoid a formal newsreader style.
-          Avoid robotic delivery.
-          Pronounce Tamil words naturally.
-          English words appearing in the Tamil transcript should also
-          flow naturally inside the Tamil sentence.
-
-          Transcript:
-          {narration}
-          """
-
-          response = client.models.generate_content(
-              model="gemini-2.5-flash-preview-tts",
-              contents=prompt,
-              config=types.GenerateContentConfig(
-                  temperature=1,
-                  response_modalities=["AUDIO"],
-                  speech_config=types.SpeechConfig(
-                      voice_config=types.VoiceConfig(
-                          prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                              voice_name="Zephyr"
-                          )
-                      )
-                  ),
-              ),
-          )
-
-          audio_data = None
-
-          for candidate in response.candidates or []:
-              if not candidate.content:
-                  continue
-
-              for part in candidate.content.parts or []:
-                  if part.inline_data and part.inline_data.data:
-                      audio_data = part.inline_data.data
-                      break
-
-              if audio_data:
-                  break
-
-          if not audio_data:
-              raise RuntimeError("Gemini TTS returned no audio data")
-
-          with wave.open("narration_raw.wav", "wb") as wav_file:
-              wav_file.setnchannels(1)
-              wav_file.setsampwidth(2)
-              wav_file.setframerate(24000)
-              wav_file.writeframes(audio_data)
-
-          print("Gemini Tamil narration generated successfully")
-          PYTHON
-
-          echo "Creating Tamil narration using Gemini TTS / Zephyr"
-
-          python3 generate_tts.py
-
-          if [ ! -s narration_raw.wav ]; then
-            echo "Gemini Tamil voice generation failed"
-            exit 1
-          fi
-
-          ffmpeg -y \
-            -i narration_raw.wav \
-            -af "aresample=48000,loudnorm=I=-16:LRA=11:TP=-1.5" \
-            -ar 48000 \
-            -c:a libmp3lame \
-            -b:a 192k \
-            narration.mp3
-
-          if [ ! -s narration.mp3 ]; then
-            echo "Narration MP3 conversion failed"
-            exit 1
-          fi
-
-          VOICE_DURATION=$(ffprobe \
-            -v error \
-            -show_entries format=duration \
-            -of default=noprint_wrappers=1:nokey=1 \
-            narration.mp3)
-
-          echo "Tamil narration created successfully"
-          echo "Narration duration: $VOICE_DURATION seconds"
-
-      - name: Create individual scenes
-        run: |
-          COUNT=$(jq '.scenes | length' payload.json)
-
-          mkdir -p clips
-
-          VOICE_DURATION=$(ffprobe \
-            -v error \
-            -show_entries format=duration \
-            -of default=noprint_wrappers=1:nokey=1 \
-            narration.mp3)
-
-          echo "Voice duration: $VOICE_DURATION seconds"
-          echo "Scene count: $COUNT"
-
-          PER_SCENE_DURATION=$(awk \
-            -v duration="$VOICE_DURATION" \
-            -v count="$COUNT" \
-            'BEGIN {
-              printf "%.3f", (duration + 1.5) / count
-            }')
-
-          echo "Each scene duration: $PER_SCENE_DURATION seconds"
-
-          for i in $(seq 0 $((COUNT - 1))); do
-            NUMBER=$((i + 1))
-
-            echo "Rendering scene $NUMBER"
-
-            ffmpeg -y \
-              -loop 1 \
-              -i "scenes/scene_${NUMBER}.jpg" \
-              -t "$PER_SCENE_DURATION" \
-              -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=24,format=yuv420p" \
-              -an \
-              -c:v libx264 \
-              -preset medium \
-              -crf 24 \
-              "clips/scene_${NUMBER}.mp4"
-          done
-
-      - name: Join scenes
-        run: |
-          rm -f concat.txt
-
-          COUNT=$(jq '.scenes | length' payload.json)
-
-          for i in $(seq 1 "$COUNT"); do
-            echo "file 'clips/scene_${i}.mp4'" >> concat.txt
-          done
-
-          echo "Joining all scenes"
-          cat concat.txt
-
-          ffmpeg -y \
-            -f concat \
-            -safe 0 \
-            -i concat.txt \
-            -c copy \
-            video_no_audio.mp4
-
-      - name: Add Tamil narration
-        run: |
-          TOTAL_DURATION=$(ffprobe \
-            -v error \
-            -show_entries format=duration \
-            -of default=noprint_wrappers=1:nokey=1 \
-            video_no_audio.mp4)
-
-          VOICE_DURATION=$(ffprobe \
-            -v error \
-            -show_entries format=duration \
-            -of default=noprint_wrappers=1:nokey=1 \
-            narration.mp3)
-
-          echo "Video duration: $TOTAL_DURATION"
-          echo "Voice duration: $VOICE_DURATION"
-
-          ffmpeg -y \
-            -i video_no_audio.mp4 \
-            -i narration.mp3 \
-            -filter_complex "[1:a]apad,atrim=duration=${TOTAL_DURATION}[audio]" \
-            -map 0:v \
-            -map "[audio]" \
-            -t "$TOTAL_DURATION" \
-            -c:v copy \
-            -c:a aac \
-            -b:a 192k \
-            -ar 48000 \
-            -movflags +faststart \
-            output.mp4
-
-      - name: Check final video
-        run: |
-          if [ ! -s output.mp4 ]; then
-            echo "Final video was not created"
-            exit 1
-          fi
-
-          echo "Final video information"
-
-          ffprobe \
-            -v error \
-            -show_entries format=duration,size,bit_rate \
-            -show_streams \
-            output.mp4
-
-      - name: Upload video artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: animated-video
-          path: output.mp4
-          retention-days: 1
-
-      - name: Resume n8n
-        if: always()
-        env:
-          RESUME_URL: ${{ inputs.resumeUrl }}
-        run: |
-          curl -X POST \
-            -H "Content-Type: application/json" \
-            -d "{\"status\":\"${{ job.status }}\"}" \
-            "$RESUME_URL"
