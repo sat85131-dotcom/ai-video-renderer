@@ -72,12 +72,14 @@ jobs:
               exit 1
             fi
 
-            ENHANCED_PROMPT="${PROMPT}. Cinematic premium 3D animated film quality, highly detailed, sharp textures, professional lighting, vibrant natural colors, strong depth, crisp focus, vertical 9:16 composition, main subject centered safely for vertical framing, visually consistent recurring characters, clean detailed environment, professional YouTube Shorts visual, no text, no watermark."
+            ENHANCED_PROMPT="${PROMPT}. Cinematic premium 3D animated film quality, highly detailed, sharp textures, professional lighting, vibrant natural colors, strong depth, crisp focus, vertical 9:16 composition, main subject centered safely for vertical framing, visually consistent recurring characters, clean detailed environment, family-friendly, non-graphic, no text, no watermark."
 
             echo "======================================"
             echo "SCENE $NUMBER / $COUNT"
             echo "Generating with Cloudflare FLUX..."
             echo "======================================"
+
+            # ---------- FIRST ATTEMPT ----------
 
             jq -n \
               --arg prompt "$ENHANCED_PROMPT" \
@@ -97,12 +99,58 @@ jobs:
 
             echo "Cloudflare HTTP: $HTTP_CODE"
 
+            # ---------- SAFE RETRY IF NSFW BLOCK ----------
+
             if [ "$HTTP_CODE" != "200" ]; then
-              echo "Cloudflare image generation failed."
-              echo "Cloudflare response:"
-              cat "cf_response_${NUMBER}.json"
-              exit 1
+
+              RESPONSE_TEXT=$(cat "cf_response_${NUMBER}.json")
+
+              if echo "$RESPONSE_TEXT" | grep -qiE \
+                'NSFW|8007|unsafe|safety'; then
+
+                echo "Scene $NUMBER blocked by safety filter."
+                echo "Retrying with neutral family-friendly prompt..."
+
+                SAFE_PROMPT="Create a family-friendly cinematic 3D animated scene based only on this general theme: ${PROMPT}. Remove or avoid any sexual content, nudity, graphic violence, injuries, blood, weapons, disturbing imagery, dangerous acts, or other mature material. Show only a harmless, non-graphic, age-appropriate visual interpretation. Premium animated film quality, highly detailed environment, professional lighting, vibrant natural colors, crisp focus, strong depth, vertical 9:16 composition, centered main subject, no text, no watermark."
+
+                jq -n \
+                  --arg prompt "$SAFE_PROMPT" \
+                  '{
+                    prompt: $prompt,
+                    steps: 8
+                  }' > "cf_safe_request_${NUMBER}.json"
+
+                HTTP_CODE=$(curl -sS \
+                  -o "cf_safe_response_${NUMBER}.json" \
+                  -w "%{http_code}" \
+                  -X POST \
+                  "https://api.cloudflare.com/client/v4/accounts/058021d96073d8aa330a8e9348a949ba/ai/run/@cf/black-forest-labs/flux-1-schnell" \
+                  -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+                  -H "Content-Type: application/json" \
+                  --data @"cf_safe_request_${NUMBER}.json")
+
+                echo "Safe retry HTTP: $HTTP_CODE"
+
+                if [ "$HTTP_CODE" = "200" ]; then
+                  cp "cf_safe_response_${NUMBER}.json" \
+                     "cf_response_${NUMBER}.json"
+                  echo "Safe retry SUCCESS"
+                else
+                  echo "Safe retry also failed."
+                  cat "cf_safe_response_${NUMBER}.json"
+                  exit 1
+                fi
+
+              else
+
+                echo "Cloudflare failed for a reason other than safety."
+                cat "cf_response_${NUMBER}.json"
+                exit 1
+
+              fi
             fi
+
+            # ---------- EXTRACT IMAGE ----------
 
             IMAGE_BASE64=$(jq -r \
               '.result.image // empty' \
@@ -123,6 +171,8 @@ jobs:
               exit 1
             fi
 
+            # ---------- FINAL 1080x1920 ----------
+
             ffmpeg -y \
               -i "scenes/scene_${NUMBER}_source.jpg" \
               -vf "scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,crop=1080:1920" \
@@ -141,8 +191,7 @@ jobs:
 
           echo "======================================"
           echo "ALL 15 CLOUDFLARE SCENES READY"
-          echo "======================================"
-          
+          echo "======================================"          
       - name: Create Tamil narration with Gemini TTS
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
