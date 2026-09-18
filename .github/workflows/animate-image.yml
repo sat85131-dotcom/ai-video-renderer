@@ -1,689 +1,509 @@
-name: Render AI Video
+name: Animate Telegram Image
 
 on:
   workflow_dispatch:
     inputs:
-      scenes_json:
-        description: "Scenes JSON"
+      payload:
+        description: "Scene data from n8n"
+        required: true
+        type: string
+      resumeUrl:
+        description: "n8n callback URL"
         required: true
         type: string
 
 jobs:
-  render:
+  animate:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
       - name: Install tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg fonts-dejavu-core
-          python3 -m pip install --upgrade edge-tts
-          python3 -m pip install openai-whisper
+          sudo apt-get install -y ffmpeg jq python3-pip
+          python3 -m pip install --upgrade google-genai
 
-      - name: Save scenes JSON
+      - name: Read scene data
         env:
-          SCENES_JSON: ${{ inputs.scenes_json }}
+          PAYLOAD: ${{ inputs.payload }}
         run: |
-          printf '%s' "$SCENES_JSON" > scenes.json
-          python3 -m json.tool scenes.json
+          printf '%s' "$PAYLOAD" > payload.json
 
-      - name: Render all scenes
+          echo "Payload received"
+
+          jq '{
+            title,
+            narration,
+            music_mood,
+            scene_count: (.scenes | length)
+          }' payload.json
+
+          COUNT=$(jq '.scenes | length' payload.json)
+
+          if [ "$COUNT" -ne 15 ]; then
+            echo "Expected 15 scenes but received $COUNT"
+            exit 1
+          fi
+
+      - name: Generate scene images with Cloudflare FLUX + AI Horde fallback
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
-          python3 <<'PY'
-          import json
+          mkdir -p scenes
+
+          COUNT=$(jq '.scenes | length' payload.json)
+          echo "Total scenes: $COUNT"
+
+          if [ "$COUNT" -eq 0 ]; then
+            echo "No scenes found"
+            exit 1
+          fi
+
+          for i in $(seq 0 $((COUNT - 1))); do
+            NUMBER=$((i + 1))
+            PROMPT=$(jq -r ".scenes[$i].image_prompt" payload.json)
+
+            if [ -z "$PROMPT" ] || [ "$PROMPT" = "null" ]; then
+              echo "Missing image prompt for scene $NUMBER"
+              exit 1
+            fi
+
+            ENHANCED_PROMPT="${PROMPT}, cinematic high quality 3D animation, bright natural lighting, vibrant balanced colors, sharp subject, clean detailed textures, professional composition, crisp focus, visually appealing YouTube Shorts style, realistic depth, no text, no watermark"
+
+            echo "========================================"
+            echo "Generating scene $NUMBER of $COUNT"
+            echo "========================================"
+
+            # ------------------------------------------
+            # 1. TRY CLOUDFLARE FLUX FIRST
+            # ------------------------------------------
+
+            jq -n \
+              --arg prompt "$ENHANCED_PROMPT" \
+              '{
+                prompt: $prompt,
+                steps: 8
+              }' > "cf_request_${NUMBER}.json"
+
+            CF_HTTP_CODE=$(curl -sS \
+              -o "cf_response_${NUMBER}.json" \
+              -w "%{http_code}" \
+              -X POST \
+              "https://api.cloudflare.com/client/v4/accounts/058021d96073d8aa330a8e9348a949ba/ai/run/@cf/black-forest-labs/flux-1-schnell" \
+              -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data @"cf_request_${NUMBER}.json")
+
+            echo "Cloudflare HTTP code: $CF_HTTP_CODE"
+
+            CF_SUCCESS="false"
+
+            if [ "$CF_HTTP_CODE" = "200" ]; then
+              IMAGE_BASE64=$(jq -r '.result.image // empty' "cf_response_${NUMBER}.json")
+
+              if [ -n "$IMAGE_BASE64" ]; then
+                printf '%s' "$IMAGE_BASE64" | base64 --decode \
+                  > "scenes/scene_${NUMBER}_raw.jpg"
+
+                if [ -s "scenes/scene_${NUMBER}_raw.jpg" ]; then
+                  CF_SUCCESS="true"
+                  echo "Cloudflare scene $NUMBER generated successfully"
+                fi
+              fi
+            fi
+
+            # ------------------------------------------
+            # 2. FALLBACK TO AI HORDE
+            # ------------------------------------------
+
+            if [ "$CF_SUCCESS" != "true" ]; then
+              echo "Cloudflare unavailable for scene $NUMBER"
+              echo "Switching to AI Horde fallback..."
+
+              cat "cf_response_${NUMBER}.json" || true
+
+              jq -n \
+                --arg prompt "$ENHANCED_PROMPT" \
+                '{
+                  prompt: $prompt,
+                  params: {
+                    width: 512,
+                    height: 512,
+                    steps: 20,
+                    cfg_scale: 7,
+                    sampler_name: "k_euler_a",
+                    n: 1
+                  }
+                }' > "horde_request_${NUMBER}.json"
+
+              HORDE_HTTP_CODE=$(curl -sS \
+                -o "horde_submit_${NUMBER}.json" \
+                -w "%{http_code}" \
+                -X POST \
+                "https://aihorde.net/api/v2/generate/async" \
+                -H "accept: application/json" \
+                -H "apikey: 0000000000" \
+                -H "Client-Agent: RSK-ON-LIVE:1.0:github-actions" \
+                -H "Content-Type: application/json" \
+                --data @"horde_request_${NUMBER}.json")
+
+              echo "AI Horde HTTP code: $HORDE_HTTP_CODE"
+
+              if [ "$HORDE_HTTP_CODE" != "202" ]; then
+                echo "AI Horde rejected scene $NUMBER"
+                cat "horde_submit_${NUMBER}.json"
+                exit 1
+              fi
+
+              REQUEST_ID=$(jq -r '.id // empty' "horde_submit_${NUMBER}.json")
+
+              if [ -z "$REQUEST_ID" ]; then
+                echo "AI Horde did not return request ID"
+                cat "horde_submit_${NUMBER}.json"
+                exit 1
+              fi
+
+              echo "AI Horde Request ID: $REQUEST_ID"
+
+              DONE="false"
+              FAULTED="false"
+
+              for ATTEMPT in $(seq 1 60); do
+                sleep 10
+
+                curl -sS \
+                  "https://aihorde.net/api/v2/generate/check/${REQUEST_ID}" \
+                  -H "accept: application/json" \
+                  -H "Client-Agent: RSK-ON-LIVE:1.0:github-actions" \
+                  -o "horde_check_${NUMBER}.json"
+
+                DONE=$(jq -r '.done // false' "horde_check_${NUMBER}.json")
+                FAULTED=$(jq -r '.faulted // false' "horde_check_${NUMBER}.json")
+                WAITING=$(jq -r '.waiting // 0' "horde_check_${NUMBER}.json")
+                PROCESSING=$(jq -r '.processing // 0' "horde_check_${NUMBER}.json")
+
+                echo "AI Horde attempt $ATTEMPT/60"
+                echo "Done: $DONE"
+                echo "Waiting: $WAITING"
+                echo "Processing: $PROCESSING"
+
+                if [ "$FAULTED" = "true" ]; then
+                  echo "AI Horde generation faulted"
+                  cat "horde_check_${NUMBER}.json"
+                  exit 1
+                fi
+
+                if [ "$DONE" = "true" ]; then
+                  break
+                fi
+              done
+
+              if [ "$DONE" != "true" ]; then
+                echo "AI Horde timeout for scene $NUMBER"
+                exit 1
+              fi
+
+              curl -sS \
+                "https://aihorde.net/api/v2/generate/status/${REQUEST_ID}" \
+                -H "accept: application/json" \
+                -H "Client-Agent: RSK-ON-LIVE:1.0:github-actions" \
+                -o "horde_status_${NUMBER}.json"
+
+              IMAGE_URL=$(jq -r \
+                '.generations[0].img // empty' \
+                "horde_status_${NUMBER}.json")
+
+              if [ -z "$IMAGE_URL" ]; then
+                echo "AI Horde returned no image"
+                cat "horde_status_${NUMBER}.json"
+                exit 1
+              fi
+
+              curl -L -sS --fail \
+                "$IMAGE_URL" \
+                -o "scenes/scene_${NUMBER}_raw.webp"
+
+              if [ ! -s "scenes/scene_${NUMBER}_raw.webp" ]; then
+                echo "AI Horde image download failed"
+                exit 1
+              fi
+
+              echo "AI Horde scene $NUMBER generated successfully"
+            fi
+
+            # ------------------------------------------
+            # 3. CREATE FINAL 1080x1920 IMAGE
+            # ------------------------------------------
+
+            if [ "$CF_SUCCESS" = "true" ]; then
+              SOURCE_FILE="scenes/scene_${NUMBER}_raw.jpg"
+            else
+              SOURCE_FILE="scenes/scene_${NUMBER}_raw.webp"
+            fi
+
+            ffmpeg -y \
+              -i "$SOURCE_FILE" \
+              -vf "scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,crop=1080:1920,unsharp=5:5:0.5:5:5:0.0" \
+              -q:v 1 \
+              "scenes/scene_${NUMBER}.jpg"
+
+            if [ ! -s "scenes/scene_${NUMBER}.jpg" ]; then
+              echo "Final conversion failed for scene $NUMBER"
+              exit 1
+            fi
+
+            echo "Scene $NUMBER READY"
+            file "scenes/scene_${NUMBER}.jpg"
+
+          done
+
+          echo "========================================"
+          echo "ALL $COUNT SCENES GENERATED"
+          echo "========================================"
+          
+      - name: Create Tamil narration with Gemini TTS
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          jq -r '.narration' payload.json > narration.txt
+
+          if [ ! -s narration.txt ]; then
+            echo "Narration is empty"
+            exit 1
+          fi
+
+          cat > generate_tts.py <<'PYTHON'
           import os
-          import subprocess
-          import asyncio
-          import edge_tts
-          import whisper
+          import wave
+          from google import genai
+          from google.genai import types
 
-          with open("scenes.json", "r", encoding="utf-8") as f:
-              scenes = json.load(f)
+          api_key = os.environ.get("GEMINI_API_KEY")
 
-          os.makedirs("segments", exist_ok=True)
+          if not api_key:
+              raise RuntimeError("GEMINI_API_KEY is missing")
 
-          print("Loading Whisper model...")
-          whisper_model = whisper.load_model("tiny")
-          print("Whisper ready")
+          with open("narration.txt", "r", encoding="utf-8") as f:
+              narration = f.read().strip()
 
-          async def make_voice(text, output):
-              communicate = edge_tts.Communicate(
-                  text=text,
-                  voice="en-US-AriaNeural",
-                  rate="+5%"
-              )
-              await communicate.save(output)
+          if not narration:
+              raise RuntimeError("Narration is empty")
 
-          def ass_time(seconds):
-              hours = int(seconds // 3600)
-              minutes = int((seconds % 3600) // 60)
-              secs = seconds % 60
-              return f"{hours}:{minutes:02d}:{secs:05.2f}"
+          client = genai.Client(api_key=api_key)
 
-          def escape_ass(text):
-              return (
-                  str(text)
-                  .replace("\\", r"\\")
-                  .replace("{", r"\{")
-                  .replace("}", r"\}")
-                  .replace("\n", " ")
-                  .strip()
-              )
+          prompt = f"""
+          Read the following transcript as a warm, natural Tamil female
+          YouTube storyteller.
 
-          def get_word_timings(audio_file):
-              result = whisper_model.transcribe(
-                  audio_file,
-                  language="en",
-                  task="transcribe",
-                  word_timestamps=True,
-                  fp16=False
-              )
+          Speak in authentic conversational spoken Tamil.
+          Use clear native Tamil pronunciation.
+          Sound friendly, bright, expressive and relaxed.
+          Keep the delivery natural, like a Tamil YouTube creator
+          telling an interesting story to viewers.
+          Avoid a formal newsreader style.
+          Avoid robotic delivery.
+          Pronounce Tamil words naturally.
+          English words appearing in the Tamil transcript should
+          flow naturally inside the Tamil sentence.
 
-              words = []
+          Transcript:
+          {narration}
+          """
 
-              for segment in result.get("segments", []):
-                  for word in segment.get("words", []):
-                      text = word.get("word", "").strip()
-
-                      if not text:
-                          continue
-
-                      words.append({
-                          "text": text,
-                          "start": float(word["start"]),
-                          "end": float(word["end"])
-                      })
-
-              return words
-
-          def create_ass(words, output_file):
-              lines = [
-                  "[Script Info]",
-                  "ScriptType: v4.00+",
-                  "PlayResX: 1080",
-                  "PlayResY: 1920",
-                  "WrapStyle: 2",
-                  "ScaledBorderAndShadow: yes",
-                  "",
-                  "[V4+ Styles]",
-                  "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding",
-                  "Style: Default,DejaVu Sans,68,&H00FFFFFF,&H00FFFFFF,&H00000000,&H70000000,-1,0,0,0,100,100,0,0,1,5,1,2,70,70,300,1",
-                  "",
-                  "[Events]",
-                  "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text"
-              ]
-
-              chunk_size = 4
-
-              for index, word in enumerate(words):
-                  group_start = (index // chunk_size) * chunk_size
-                  group_end = min(
-                      group_start + chunk_size,
-                      len(words)
-                  )
-
-                  group = words[group_start:group_end]
-                  display_words = []
-
-                  for local_index, item in enumerate(group):
-                      actual_index = group_start + local_index
-                      safe_word = escape_ass(item["text"])
-
-                      if actual_index == index:
-                          display_words.append(
-                              r"{\1c&H0000FF00&\b1}" +
-                              safe_word +
-                              r"{\1c&H00FFFFFF&\b1}"
+          response = client.models.generate_content(
+              model="gemini-2.5-flash-preview-tts",
+              contents=prompt,
+              config=types.GenerateContentConfig(
+                  temperature=1,
+                  response_modalities=["AUDIO"],
+                  speech_config=types.SpeechConfig(
+                      voice_config=types.VoiceConfig(
+                          prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                              voice_name="Zephyr"
                           )
-                      else:
-                          display_words.append(
-                              r"{\1c&H00FFFFFF&\b1}" +
-                              safe_word
-                          )
-
-                  caption = " ".join(display_words)
-                  start = word["start"]
-
-                  if index + 1 < len(words):
-                      end = words[index + 1]["start"]
-                  else:
-                      end = word["end"] + 0.10
-
-                  if end <= start:
-                      end = start + 0.10
-
-                  lines.append(
-                      f"Dialogue: 0,"
-                      f"{ass_time(start)},"
-                      f"{ass_time(end)},"
-                      f"Default,,0,0,0,,"
-                      f"{{\\an2}}{caption}"
-                  )
-
-              with open(
-                  output_file,
-                  "w",
-                  encoding="utf-8-sig"
-              ) as f:
-                  f.write("\n".join(lines))
-
-          segment_files = []
-
-          for i, scene in enumerate(scenes, start=1):
-              number = str(i).zfill(2)
-
-              video_url = scene.get("video_url")
-              voice_text = scene.get(
-                  "voice_text",
-                  ""
-              ).strip()
-
-              if not video_url:
-                  raise RuntimeError(
-                      f"Scene {i}: video_url missing"
-                  )
-
-              if not voice_text:
-                  raise RuntimeError(
-                      f"Scene {i}: voice_text missing"
-                  )
-
-              source_video = f"segments/source_{number}.mp4"
-              voice_file = f"segments/voice_{number}.mp3"
-
-              subtitle_file = os.path.abspath(
-                  f"segments/subtitle_{number}.ass"
-              )
-
-              output_file = f"segments/scene_{number}.mp4"
-
-              print("==========================")
-              print(f"SCENE {i}")
-              print("==========================")
-
-              print("Downloading clip...")
-
-              subprocess.run([
-                  "curl",
-                  "-L",
-                  "--fail",
-                  "--retry", "3",
-                  "--retry-delay", "2",
-                  video_url,
-                  "-o",
-                  source_video
-              ], check=True)
-
-              print("Generating English voice...")
-
-              asyncio.run(
-                  make_voice(
-                      voice_text,
-                      voice_file
-                  )
-              )
-
-              print("Getting exact word timings...")
-
-              words = get_word_timings(
-                  voice_file
-              )
-
-              print(
-                  f"Scene {i}: {len(words)} words detected"
-              )
-
-              if len(words) == 0:
-                  raise RuntimeError(
-                      f"Scene {i}: Whisper returned no words"
-                  )
-
-              print("Creating green captions...")
-
-              create_ass(
-                  words,
-                  subtitle_file
-              )
-
-              duration = subprocess.check_output([
-                  "ffprobe",
-                  "-v", "error",
-                  "-show_entries",
-                  "format=duration",
-                  "-of",
-                  "default=noprint_wrappers=1:nokey=1",
-                  voice_file
-              ]).decode().strip()
-
-              duration = float(duration)
-
-              print(
-                  f"Voice duration: {duration:.2f}s"
-              )
-
-              subtitle_filter = (
-                  f"subtitles='{subtitle_file}':"
-                  "fontsdir='/usr/share/fonts'"
-              )
-
-              # Add a subtle cinematic zoom so stock footage feels less static.
-              # Keep it gentle to avoid motion sickness and preserve caption readability.
-              zoom_filter = (
-                  "zoompan="
-                  "z='min(zoom+0.0008,1.06)':"
-                  "x='iw/2-(iw/zoom/2)':"
-                  "y='ih/2-(ih/zoom/2)':"
-                  "d=1:"
-                  "s=1080x1920:"
-                  "fps=30,"
-              )
-
-              video_filter = (
-                  "scale=1080:1920:"
-                  "force_original_aspect_ratio=increase,"
-                  "crop=1080:1920,"
-                  + zoom_filter +
-                  "eq=contrast=1.06:"
-                  "saturation=1.10:"
-                  "brightness=0.01,"
-                  + subtitle_filter +
-                  ",format=yuv420p"
-              )
-
-              print("Rendering scene...")
-
-              subprocess.run([
-                  "ffmpeg",
-                  "-y",
-
-                  "-stream_loop", "-1",
-                  "-i", source_video,
-
-                  "-i", voice_file,
-
-                  "-t", str(duration),
-
-                  "-vf", video_filter,
-
-                  "-map", "0:v:0",
-                  "-map", "1:a:0",
-
-                  "-c:v", "libx264",
-                  "-preset", "veryfast",
-                  "-crf", "22",
-
-                  "-c:a", "aac",
-                  "-b:a", "192k",
-                  "-ar", "48000",
-                  "-ac", "2",
-
-                  "-movflags", "+faststart",
-
-                  output_file
-              ], check=True)
-
-              segment_files.append(
-                  output_file
-              )
-
-          print("ALL SCENES RENDERED")
-          PY
-
-      - name: Join scenes with dynamic transitions
-        run: |
-          python3 <<'PY'
-          import glob
-          import subprocess
-          import shutil
-
-          scenes = sorted(
-              glob.glob("segments/scene_*.mp4")
+                      )
+                  ),
+              ),
           )
 
-          if not scenes:
-              raise RuntimeError(
-                  "No rendered scene files found"
-              )
+          audio_data = None
 
-          if len(scenes) == 1:
-              shutil.copyfile(
-                  scenes[0],
-                  "final.mp4"
-              )
-              raise SystemExit(0)
+          for candidate in response.candidates or []:
+              if not candidate.content:
+                  continue
 
-          durations = []
+              for part in candidate.content.parts or []:
+                  if part.inline_data and part.inline_data.data:
+                      audio_data = part.inline_data.data
+                      break
 
-          for scene in scenes:
-              duration = subprocess.check_output([
-                  "ffprobe",
-                  "-v", "error",
-                  "-show_entries",
-                  "format=duration",
-                  "-of",
-                  "default=noprint_wrappers=1:nokey=1",
-                  scene
-              ]).decode().strip()
+              if audio_data:
+                  break
 
-              durations.append(
-                  float(duration)
-              )
+          if not audio_data:
+              raise RuntimeError("Gemini TTS returned no audio data")
 
-          transition_duration = min(
-              0.25,
-              min(durations) / 3
-          )
+          with wave.open("narration_raw.wav", "wb") as wav_file:
+              wav_file.setnchannels(1)
+              wav_file.setsampwidth(2)
+              wav_file.setframerate(24000)
+              wav_file.writeframes(audio_data)
 
-          print("Scene durations:")
+          print("Gemini Tamil narration generated successfully")
+          PYTHON
 
-          for i, duration in enumerate(
-              durations,
-              start=1
-          ):
-              print(
-                  f"Scene {i}: {duration:.2f}s"
-              )
+          python3 generate_tts.py
 
-          print(
-              "Transition duration:",
-              transition_duration
-          )
-
-          command = [
-              "ffmpeg",
-              "-y"
-          ]
-
-          for scene in scenes:
-              command.extend([
-                  "-i",
-                  scene
-              ])
-
-          filters = []
-
-          for i in range(len(scenes)):
-              filters.append(
-                  f"[{i}:v]"
-                  f"settb=AVTB,"
-                  f"setpts=PTS-STARTPTS"
-                  f"[v{i}]"
-              )
-
-              filters.append(
-                  f"[{i}:a]"
-                  f"asetpts=PTS-STARTPTS"
-                  f"[a{i}]"
-              )
-
-          running_duration = durations[0]
-
-          video_left = "v0"
-          audio_left = "a0"
-
-          for i in range(1, len(scenes)):
-              video_output = f"vx{i}"
-              audio_output = f"ax{i}"
-
-              offset = (
-                  running_duration -
-                  transition_duration
-              )
-
-              filters.append(
-                  f"[{video_left}]"
-                  f"[v{i}]"
-                  f"xfade="
-                  f"transition=fade:"
-                  f"duration={transition_duration:.3f}:"
-                  f"offset={offset:.3f}"
-                  f"[{video_output}]"
-              )
-
-              filters.append(
-                  f"[{audio_left}]"
-                  f"[a{i}]"
-                  f"acrossfade="
-                  f"d={transition_duration:.3f}:"
-                  f"c1=tri:"
-                  f"c2=tri"
-                  f"[{audio_output}]"
-              )
-
-              running_duration = (
-                  running_duration +
-                  durations[i] -
-                  transition_duration
-              )
-
-              video_left = video_output
-              audio_left = audio_output
-
-          filter_complex = ";".join(
-              filters
-          )
-
-          command.extend([
-              "-filter_complex",
-              filter_complex,
-
-              "-map",
-              f"[{video_left}]",
-
-              "-map",
-              f"[{audio_left}]",
-
-              "-c:v",
-              "libx264",
-
-              "-preset",
-              "veryfast",
-
-              "-crf",
-              "22",
-
-              "-c:a",
-              "aac",
-
-              "-b:a",
-              "192k",
-
-              "-ar",
-              "48000",
-
-              "-ac",
-              "2",
-
-              "-movflags",
-              "+faststart",
-
-              "final.mp4"
-          ])
-
-          print(
-              "Rendering final video with dynamic transitions..."
-          )
-
-          subprocess.run(
-              command,
-              check=True
-          )
-
-          print(
-              "FINAL TRANSITION VIDEO READY"
-          )
-          PY
-
-      - name: Add background music with voice ducking
-        run: |
-          python3 <<'PY'
-          import subprocess
-          import urllib.request
-          import os
-
-          MUSIC_URL = "https://cdn.pixabay.com/download/audio/2022/03/15/audio_115b9b04e5.mp3"
-
-          print("Downloading background music...")
-
-          try:
-              urllib.request.urlretrieve(
-                  MUSIC_URL,
-                  "background.mp3"
-              )
-
-          except Exception as e:
-              print(
-                  "Music download failed:",
-                  e
-              )
-
-              print(
-                  "Keeping video without background music."
-              )
-
-              raise SystemExit(0)
-
-          duration = subprocess.check_output([
-              "ffprobe",
-              "-v", "error",
-              "-show_entries",
-              "format=duration",
-              "-of",
-              "default=noprint_wrappers=1:nokey=1",
-              "final.mp4"
-          ]).decode().strip()
-
-          duration = float(duration)
-
-          print(
-              f"Final video duration: {duration:.2f}s"
-          )
-
-          filter_complex = (
-              "[1:a]"
-              "volume=0.12,"
-              f"atrim=0:{duration},"
-              "asetpts=PTS-STARTPTS"
-              "[music];"
-
-              "[0:a]"
-              "asplit=2"
-              "[voice][sidechain];"
-
-              "[music]"
-              "[sidechain]"
-              "sidechaincompress="
-              "threshold=0.02:"
-              "ratio=8:"
-              "attack=20:"
-              "release=350"
-              "[ducked];"
-
-              "[voice]"
-              "[ducked]"
-              "amix="
-              "inputs=2:"
-              "duration=first:"
-              "dropout_transition=2,"
-              "alimiter=limit=0.95"
-              "[mixed]"
-          )
-
-          subprocess.run([
-              "ffmpeg",
-              "-y",
-
-              "-i",
-              "final.mp4",
-
-              "-stream_loop",
-              "-1",
-
-              "-i",
-              "background.mp3",
-
-              "-filter_complex",
-              filter_complex,
-
-              "-map",
-              "0:v:0",
-
-              "-map",
-              "[mixed]",
-
-              "-c:v",
-              "copy",
-
-              "-c:a",
-              "aac",
-
-              "-b:a",
-              "192k",
-
-              "-ar",
-              "48000",
-
-              "-ac",
-              "2",
-
-              "-shortest",
-
-              "-movflags",
-              "+faststart",
-
-              "final_music.mp4"
-
-          ], check=True)
-
-          os.replace(
-              "final_music.mp4",
-              "final.mp4"
-          )
-
-          print(
-              "BACKGROUND MUSIC + VOICE DUCKING READY"
-          )
-          PY
-
-      - name: Fix final video compatibility
-        run: |
-          echo "Fixing MP4 for mobile, browser and YouTube playback..."
+          if [ ! -s narration_raw.wav ]; then
+            echo "Gemini Tamil voice generation failed"
+            exit 1
+          fi
 
           ffmpeg -y \
-            -fflags +genpts \
-            -i final.mp4 \
-            -map 0:v:0 \
-            -map 0:a:0 \
-            -c:v libx264 \
-            -preset veryfast \
-            -crf 22 \
-            -pix_fmt yuv420p \
-            -profile:v high \
-            -level 4.1 \
-            -r 30 \
+            -i narration_raw.wav \
+            -af "aresample=48000,loudnorm=I=-16:LRA=11:TP=-1.5" \
+            -ar 48000 \
+            -c:a libmp3lame \
+            -b:a 192k \
+            narration.mp3
+
+          if [ ! -s narration.mp3 ]; then
+            echo "Narration MP3 conversion failed"
+            exit 1
+          fi
+
+          VOICE_DURATION=$(ffprobe \
+            -v error \
+            -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 \
+            narration.mp3)
+
+          echo "Narration duration: $VOICE_DURATION seconds"
+
+      - name: Create individual scenes
+        run: |
+          COUNT=$(jq '.scenes | length' payload.json)
+
+          mkdir -p clips
+
+          VOICE_DURATION=$(ffprobe \
+            -v error \
+            -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 \
+            narration.mp3)
+
+          PER_SCENE_DURATION=$(awk \
+            -v duration="$VOICE_DURATION" \
+            -v count="$COUNT" \
+            'BEGIN {
+              printf "%.3f", (duration + 1.5) / count
+            }')
+
+          echo "Voice duration: $VOICE_DURATION"
+          echo "Scene count: $COUNT"
+          echo "Each scene duration: $PER_SCENE_DURATION"
+
+          for i in $(seq 0 $((COUNT - 1))); do
+            NUMBER=$((i + 1))
+
+            echo "Rendering scene $NUMBER"
+
+            ffmpeg -y \
+              -loop 1 \
+              -i "scenes/scene_${NUMBER}.jpg" \
+              -t "$PER_SCENE_DURATION" \
+              -vf "scale=1080:1920:flags=lanczos,setsar=1,fps=30,format=yuv420p" \
+              -an \
+              -c:v libx264 \
+              -preset slow \
+              -crf 18 \
+              -profile:v high \
+              -level 4.1 \
+              -pix_fmt yuv420p \
+              "clips/scene_${NUMBER}.mp4"
+          done
+
+      - name: Join scenes
+        run: |
+          rm -f concat.txt
+
+          COUNT=$(jq '.scenes | length' payload.json)
+
+          for i in $(seq 1 "$COUNT"); do
+            echo "file 'clips/scene_${i}.mp4'" >> concat.txt
+          done
+
+          cat concat.txt
+
+          ffmpeg -y \
+            -f concat \
+            -safe 0 \
+            -i concat.txt \
+            -c copy \
+            video_no_audio.mp4
+
+      - name: Add Tamil narration
+        run: |
+          TOTAL_DURATION=$(ffprobe \
+            -v error \
+            -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 \
+            video_no_audio.mp4)
+
+          VOICE_DURATION=$(ffprobe \
+            -v error \
+            -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 \
+            narration.mp3)
+
+          echo "Video duration: $TOTAL_DURATION"
+          echo "Voice duration: $VOICE_DURATION"
+
+          ffmpeg -y \
+            -i video_no_audio.mp4 \
+            -i narration.mp3 \
+            -filter_complex "[1:a]apad,atrim=duration=${TOTAL_DURATION}[audio]" \
+            -map 0:v \
+            -map "[audio]" \
+            -t "$TOTAL_DURATION" \
+            -c:v copy \
             -c:a aac \
             -b:a 192k \
             -ar 48000 \
-            -ac 2 \
             -movflags +faststart \
-            final_fixed.mp4
-
-          mv final_fixed.mp4 final.mp4
-
-          echo "PLAYBACK COMPATIBILITY FIXED"
+            output.mp4
 
       - name: Check final video
         run: |
-          echo "===== FINAL VIDEO ====="
+          if [ ! -s output.mp4 ]; then
+            echo "Final video was not created"
+            exit 1
+          fi
+
+          echo "Final video information"
 
           ffprobe \
             -v error \
-            -show_entries format=duration \
-            -show_entries stream=codec_name,width,height \
-            final.mp4
+            -show_entries format=duration,size,bit_rate \
+            -show_streams \
+            output.mp4
 
-      - name: Upload final video
+      - name: Upload video artifact
         uses: actions/upload-artifact@v4
         with:
-          name: final-video
-          path: final.mp4
+          name: animated-video
+          path: output.mp4
+          retention-days: 1
+
+      - name: Resume n8n
+        if: always()
+        env:
+          RESUME_URL: ${{ inputs.resumeUrl }}
+        run: |
+          curl -X POST \
+            -H "Content-Type: application/json" \
+            -d "{\"status\":\"${{ job.status }}\"}" \
+            "$RESUME_URL"
