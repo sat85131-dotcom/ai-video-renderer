@@ -48,9 +48,10 @@ jobs:
             exit 1
           fi
 
-      - name: Generate HD scene images with Cloudflare FLUX
+      - name: Generate HD scene images with Cloudflare + Pollinations fallback
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          POLLINATIONS_API_KEY: ${{ secrets.POLLINATIONS_API_KEY }}
         run: |
           mkdir -p scenes
 
@@ -63,6 +64,7 @@ jobs:
           fi
 
           CF_URL="https://api.cloudflare.com/client/v4/accounts/058021d96073d8aa330a8e9348a949ba/ai/run/@cf/black-forest-labs/flux-1-schnell"
+          POLL_URL="https://gen.pollinations.ai/v1/images/generations"
 
           for i in $(seq 0 $((COUNT - 1))); do
 
@@ -98,36 +100,27 @@ jobs:
 
             echo "Cloudflare HTTP: $HTTP_CODE"
 
-            # ==========================================
-            # QUOTA / RATE LIMIT
-            # DO NOT RETRY - PREVENT CREDIT WASTE
-            # ==========================================
+            USE_POLLINATIONS=false
 
+            # Cloudflare quota reached -> Pollinations fallback
             if [ "$HTTP_CODE" = "429" ]; then
               echo "======================================"
-              echo "CLOUDFLARE DAILY QUOTA EXHAUSTED"
-              echo "Stopping immediately."
-              echo "No retry will be attempted."
+              echo "CLOUDFLARE QUOTA EXHAUSTED"
+              echo "Switching to Pollinations fallback"
               echo "======================================"
 
-              cat "response_${NUMBER}.json"
-              exit 1
+              USE_POLLINATIONS=true
             fi
 
-            # ==========================================
-            # OTHER CLOUDFLARE ERROR
-            # ==========================================
-
-            if [ "$HTTP_CODE" != "200" ]; then
+            # Handle other Cloudflare errors
+            if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "429" ]; then
 
               RESPONSE=$(cat "response_${NUMBER}.json")
 
-              # Safety-filter failure only
               if echo "$RESPONSE" | grep -qiE 'NSFW|8007|unsafe|safety'; then
 
-                echo "Safety filter triggered for scene $NUMBER"
-                echo "Original prompt will NOT be retried."
-                echo "Trying ONE neutral replacement."
+                echo "Cloudflare safety filter triggered."
+                echo "Trying one neutral Cloudflare replacement."
 
                 SAFE_PROMPT="A peaceful family-friendly cinematic 3D animated environment for an educational YouTube story. Beautiful atmospheric scenery, warm cinematic lighting, colorful detailed surroundings, premium animated movie quality, crisp focus, strong depth, harmless age-appropriate imagery, vertical-friendly composition, centered visual subject, calm positive atmosphere, no text, no watermark."
 
@@ -147,56 +140,125 @@ jobs:
                   -H "Content-Type: application/json" \
                   --data @"safe_request_${NUMBER}.json")
 
-                echo "Safe replacement HTTP: $SAFE_HTTP"
+                echo "Safe Cloudflare HTTP: $SAFE_HTTP"
 
-                # Quota reached during safe retry
-                if [ "$SAFE_HTTP" = "429" ]; then
-                  echo "Cloudflare quota exhausted during safe retry."
-                  echo "Stopping immediately. No more requests."
-                  cat "safe_response_${NUMBER}.json"
-                  exit 1
+                if [ "$SAFE_HTTP" = "200" ]; then
+
+                  cp "safe_response_${NUMBER}.json" \
+                     "response_${NUMBER}.json"
+
+                  HTTP_CODE="200"
+
+                elif [ "$SAFE_HTTP" = "429" ]; then
+
+                  echo "Cloudflare quota reached during safe retry."
+                  echo "Switching to Pollinations."
+
+                  USE_POLLINATIONS=true
+
+                else
+
+                  echo "Cloudflare safe retry failed."
+                  echo "Switching to Pollinations."
+
+                  USE_POLLINATIONS=true
                 fi
-
-                if [ "$SAFE_HTTP" != "200" ]; then
-                  echo "Safe replacement failed."
-                  cat "safe_response_${NUMBER}.json"
-                  exit 1
-                fi
-
-                cp "safe_response_${NUMBER}.json" \
-                   "response_${NUMBER}.json"
-
-                echo "Safe replacement SUCCESS"
 
               else
 
-                echo "Cloudflare failed for a non-safety reason."
-                cat "response_${NUMBER}.json"
-                exit 1
+                echo "Cloudflare failed."
+                echo "Switching to Pollinations."
 
+                USE_POLLINATIONS=true
               fi
             fi
 
             # ==========================================
-            # EXTRACT IMAGE
+            # POLLINATIONS FALLBACK
             # ==========================================
 
-            IMAGE_BASE64=$(jq -r \
-              '.result.image // empty' \
-              "response_${NUMBER}.json")
+            if [ "$USE_POLLINATIONS" = "true" ]; then
 
-            if [ -z "$IMAGE_BASE64" ]; then
-              echo "Cloudflare returned no image for scene $NUMBER"
-              cat "response_${NUMBER}.json"
-              exit 1
+              if [ -z "$POLLINATIONS_API_KEY" ]; then
+                echo "POLLINATIONS_API_KEY is missing"
+                exit 1
+              fi
+
+              echo "Generating scene $NUMBER with Pollinations FLUX..."
+
+              jq -n \
+                --arg prompt "$NORMAL_PROMPT" \
+                '{
+                  prompt: $prompt,
+                  model: "black-forest-labs/flux.1-schnell",
+                  n: 1,
+                  size: "1024x1024",
+                  quality: "high",
+                  response_format: "b64_json"
+                }' > "poll_request_${NUMBER}.json"
+
+              POLL_HTTP=$(curl -sS \
+                -o "poll_response_${NUMBER}.json" \
+                -w "%{http_code}" \
+                -X POST \
+                "$POLL_URL" \
+                -H "Authorization: Bearer ${POLLINATIONS_API_KEY}" \
+                -H "Content-Type: application/json" \
+                --data @"poll_request_${NUMBER}.json")
+
+              echo "Pollinations HTTP: $POLL_HTTP"
+
+              if [ "$POLL_HTTP" != "200" ]; then
+                echo "Pollinations fallback failed for scene $NUMBER"
+                cat "poll_response_${NUMBER}.json"
+                exit 1
+              fi
+
+              IMAGE_BASE64=$(jq -r \
+                '.data[0].b64_json // empty' \
+                "poll_response_${NUMBER}.json")
+
+              if [ -z "$IMAGE_BASE64" ]; then
+                echo "Pollinations returned no image for scene $NUMBER"
+                cat "poll_response_${NUMBER}.json"
+                exit 1
+              fi
+
+              printf '%s' "$IMAGE_BASE64" \
+                | base64 --decode \
+                > "scenes/scene_${NUMBER}_source.jpg"
+
+              echo "Pollinations scene $NUMBER generated successfully"
+
+            else
+
+              # ==========================================
+              # CLOUDFLARE IMAGE
+              # ==========================================
+
+              IMAGE_BASE64=$(jq -r \
+                '.result.image // empty' \
+                "response_${NUMBER}.json")
+
+              if [ -z "$IMAGE_BASE64" ]; then
+                echo "Cloudflare returned no image for scene $NUMBER"
+                cat "response_${NUMBER}.json"
+                exit 1
+              fi
+
+              printf '%s' "$IMAGE_BASE64" \
+                | base64 --decode \
+                > "scenes/scene_${NUMBER}_source.jpg"
+
+              echo "Cloudflare scene $NUMBER generated successfully"
             fi
 
-            printf '%s' "$IMAGE_BASE64" \
-              | base64 --decode \
-              > "scenes/scene_${NUMBER}_source.jpg"
+            # ==========================================
+            # VALIDATE SOURCE IMAGE
+            # ==========================================
 
             if [ ! -s "scenes/scene_${NUMBER}_source.jpg" ]; then
-              echo "Image decode failed for scene $NUMBER"
+              echo "Image generation failed for scene $NUMBER"
               exit 1
             fi
 
