@@ -1,0 +1,795 @@
+name: Animate Telegram AI Video V2
+
+on:
+  workflow_dispatch:
+    inputs:
+      payload:
+        description: "Scene data from n8n"
+        required: true
+        type: string
+      resumeUrl:
+        description: "n8n callback URL"
+        required: true
+        type: string
+
+jobs:
+  animate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      # =====================================================
+      # 1. CHECKOUT
+      # =====================================================
+
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      # =====================================================
+      # 2. INSTALL TOOLS
+      # =====================================================
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg jq python3-pip
+          python3 -m pip install --upgrade google-genai
+
+      # =====================================================
+      # 3. READ N8N PAYLOAD
+      # =====================================================
+
+      - name: Read scene data
+        env:
+          PAYLOAD: ${{ inputs.payload }}
+        run: |
+          set -e
+
+          printf '%s' "$PAYLOAD" > payload.json
+
+          echo "Payload received"
+
+          jq '{
+            title,
+            narration,
+            music_mood,
+            scene_count: (.scenes | length)
+          }' payload.json
+
+          COUNT=$(jq '.scenes | length' payload.json)
+
+          if [ "$COUNT" -ne 15 ]; then
+            echo "Expected 15 scenes but received $COUNT"
+            exit 1
+          fi
+
+          echo "15 scenes confirmed"
+
+      # =====================================================
+      # 4. GENERATE PIXAZO SOURCE IMAGES
+      #
+      # We intentionally use Pixazo here because LTX requires
+      # a publicly reachable HTTPS image URL.
+      # =====================================================
+
+      - name: Generate 15 Pixazo source images
+        env:
+          PIXAZO_API_KEY: ${{ secrets.PIXAZO_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${PIXAZO_API_KEY:-}" ]; then
+            echo "PIXAZO_API_KEY is missing"
+            exit 1
+          fi
+
+          mkdir -p scenes
+          mkdir -p image_responses
+
+          PIXAZO_IMAGE_URL="https://gateway.pixazo.ai/flux-1-schnell/v1/getData"
+
+          COUNT=$(jq '.scenes | length' payload.json)
+
+          : > scene_urls.txt
+
+          for i in $(seq 0 $((COUNT - 1))); do
+
+            NUMBER=$((i + 1))
+
+            PROMPT=$(jq -r ".scenes[$i].image_prompt" payload.json)
+
+            if [ -z "$PROMPT" ] || [ "$PROMPT" = "null" ]; then
+              echo "Missing image prompt for scene $NUMBER"
+              exit 1
+            fi
+
+            echo "======================================"
+            echo "GENERATING IMAGE $NUMBER / $COUNT"
+            echo "======================================"
+
+            STORY_TITLE=$(jq -r '.title // ""' payload.json)
+            PREV_PROMPT=""
+            if [ "$i" -gt 0 ]; then
+              PREV_PROMPT=$(jq -r ".scenes[$((i - 1))].image_prompt // \"\"" payload.json)
+            fi
+
+            NORMAL_PROMPT="${PROMPT}. This is scene ${NUMBER} of one continuous cinematic animated short titled '${STORY_TITLE}'. Maintain a coherent premium 3D animated film look across the whole story. Preserve recurring character identity, approximate age, facial features, hairstyle, clothing colors, props, architecture, environment palette and time-of-day whenever the story implies the same subject or location. Previous-scene visual context: ${PREV_PROMPT}. Compose this shot as a natural continuation rather than an unrelated poster. Layer foreground, subject and background to create strong depth for animation. Professional cinematic lighting, volumetric depth, detailed textures, natural vibrant colors, crisp focus, vertical 9:16 composition, no text, no watermark."
+
+            SEED=$((85131 + NUMBER))
+
+            jq -n \
+              --arg prompt "$NORMAL_PROMPT" \
+              --argjson seed "$SEED" \
+              '{
+                prompt: $prompt,
+                num_steps: 4,
+                seed: $seed,
+                height: 1024,
+                width: 1024
+              }' > "image_request_${NUMBER}.json"
+
+            HTTP_CODE=$(curl -sS \
+              -o "image_responses/response_${NUMBER}.json" \
+              -w "%{http_code}" \
+              -X POST \
+              "$PIXAZO_IMAGE_URL" \
+              -H "Content-Type: application/json" \
+              -H "Cache-Control: no-cache" \
+              -H "Ocp-Apim-Subscription-Key: ${PIXAZO_API_KEY}" \
+              --data @"image_request_${NUMBER}.json")
+
+            echo "Pixazo image HTTP: $HTTP_CODE"
+
+            if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "201" ]; then
+              echo "Pixazo image generation failed for scene $NUMBER"
+              cat "image_responses/response_${NUMBER}.json" || true
+              exit 1
+            fi
+
+            IMAGE_URL=$(jq -r \
+              '.output // .image // .url // .data.url // .data[0].url // empty' \
+              "image_responses/response_${NUMBER}.json")
+
+            if [ -z "$IMAGE_URL" ] || [ "$IMAGE_URL" = "null" ]; then
+              echo "No public image URL returned for scene $NUMBER"
+              cat "image_responses/response_${NUMBER}.json"
+              exit 1
+            fi
+
+            echo "$IMAGE_URL" >> scene_urls.txt
+
+            echo "Downloading source image..."
+
+            curl -L --fail \
+              "$IMAGE_URL" \
+              -o "scenes/scene_${NUMBER}_source.jpg"
+
+            if [ ! -s "scenes/scene_${NUMBER}_source.jpg" ]; then
+              echo "Image download failed for scene $NUMBER"
+              exit 1
+            fi
+
+            ffmpeg -y \
+              -i "scenes/scene_${NUMBER}_source.jpg" \
+              -vf "scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,crop=1080:1920" \
+              -q:v 2 \
+              "scenes/scene_${NUMBER}.jpg"
+
+            echo "Scene image $NUMBER ready"
+
+            sleep 2
+
+          done
+
+          echo "======================================"
+          echo "ALL 15 SOURCE IMAGES READY"
+          echo "======================================"
+
+          echo "Public URL count:"
+          wc -l scene_urls.txt
+
+      # =====================================================
+      # 5. CREATE TAMIL NARRATION WITH GEMINI ZEPHYR
+      # =====================================================
+
+      - name: Create Tamil narration with Gemini TTS
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          set -e
+
+          jq -r '.narration' payload.json > narration.txt
+
+          if [ ! -s narration.txt ]; then
+            echo "Narration is empty"
+            exit 1
+          fi
+
+          cat > generate_tts.py <<'PYTHON'
+          import os
+          import time
+          import wave
+          from google import genai
+          from google.genai import types
+
+          api_key = os.environ.get("GEMINI_API_KEY")
+
+          if not api_key:
+              raise RuntimeError("GEMINI_API_KEY is missing")
+
+          with open("narration.txt", "r", encoding="utf-8") as f:
+              narration = f.read().strip()
+
+          if not narration:
+              raise RuntimeError("Narration is empty")
+
+          client = genai.Client(api_key=api_key)
+
+          prompt = f"""
+          Read the following transcript as a warm, natural Tamil female
+          YouTube storyteller.
+
+          Speak in authentic conversational spoken Tamil.
+          Use clear native Tamil pronunciation.
+          Sound friendly, bright, expressive and relaxed.
+          Keep the delivery natural, like a Tamil YouTube creator
+          telling an interesting story to viewers.
+
+          Avoid formal literary Tamil.
+          Avoid a formal newsreader style.
+          Avoid robotic delivery.
+
+          Use natural pauses and expressive storytelling.
+          English words appearing inside the Tamil transcript should
+          flow naturally inside the Tamil sentence.
+
+          Transcript:
+
+          {narration}
+          """
+
+          response = None
+          last_error = None
+          retry_delays = [30, 60, 90]
+
+          for attempt in range(1, 5):
+              try:
+                  print(f"Gemini TTS attempt {attempt}/4")
+                  response = client.models.generate_content(
+                      model="gemini-2.5-flash-preview-tts",
+                      contents=prompt,
+                      config=types.GenerateContentConfig(
+                          temperature=1,
+                          response_modalities=["AUDIO"],
+                          speech_config=types.SpeechConfig(
+                              voice_config=types.VoiceConfig(
+                                  prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                                      voice_name="Zephyr"
+                                  )
+                              )
+                          ),
+                      ),
+                  )
+                  print("Gemini TTS request successful")
+                  break
+              except Exception as exc:
+                  last_error = exc
+                  print(f"Gemini TTS attempt {attempt} failed: {exc}")
+                  if attempt == 4:
+                      raise RuntimeError(
+                          f"Gemini TTS failed after 4 attempts: {last_error}"
+                      ) from exc
+                  wait_seconds = retry_delays[attempt - 1]
+                  print(f"Waiting {wait_seconds} seconds before retry...")
+                  time.sleep(wait_seconds)
+
+          if response is None:
+              raise RuntimeError(f"Gemini TTS failed without a response: {last_error}")
+
+          audio_data = None
+
+          for candidate in response.candidates or []:
+
+              if not candidate.content:
+                  continue
+
+              for part in candidate.content.parts or []:
+
+                  if part.inline_data and part.inline_data.data:
+                      audio_data = part.inline_data.data
+                      break
+
+              if audio_data:
+                  break
+
+          if not audio_data:
+              raise RuntimeError(
+                  "Gemini TTS returned no audio data"
+              )
+
+          with wave.open("narration_raw.wav", "wb") as wav_file:
+
+              wav_file.setnchannels(1)
+              wav_file.setsampwidth(2)
+              wav_file.setframerate(24000)
+              wav_file.writeframes(audio_data)
+
+          print(
+              "Gemini Zephyr Tamil narration generated successfully"
+          )
+          PYTHON
+
+          python3 generate_tts.py
+
+          if [ ! -s narration_raw.wav ]; then
+            echo "Gemini voice generation failed"
+            exit 1
+          fi
+
+          ffmpeg -y \
+            -i narration_raw.wav \
+            -af "aresample=48000,loudnorm=I=-16:LRA=11:TP=-1.5" \
+            -ar 48000 \
+            -c:a libmp3lame \
+            -b:a 192k \
+            narration.mp3
+
+          if [ ! -s narration.mp3 ]; then
+            echo "Narration MP3 conversion failed"
+            exit 1
+          fi
+
+          VOICE_DURATION=$(ffprobe \
+            -v error \
+            -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 \
+            narration.mp3)
+
+          echo "Narration duration: $VOICE_DURATION seconds"
+
+      # =====================================================
+      # 6. GENERATE 15 REAL AI ANIMATED CLIPS WITH LTX
+      # =====================================================
+
+      - name: Generate 15 LTX AI animated clips
+        env:
+          PIXAZO_API_KEY: ${{ secrets.PIXAZO_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${PIXAZO_API_KEY:-}" ]; then
+            echo "PIXAZO_API_KEY is missing"
+            exit 1
+          fi
+
+          mkdir -p ai_clips
+          mkdir -p ltx_responses
+
+          LTX_URL="https://gateway.pixazo.ai/ltx-video/v1/image-to-video"
+
+          COUNT=$(jq '.scenes | length' payload.json)
+
+          for i in $(seq 0 $((COUNT - 1))); do
+
+            NUMBER=$((i + 1))
+
+            echo "======================================"
+            echo "AI ANIMATION $NUMBER / $COUNT"
+            echo "======================================"
+
+            IMAGE_URL=$(sed -n "${NUMBER}p" scene_urls.txt)
+
+            if [ -z "$IMAGE_URL" ]; then
+              echo "Missing public image URL for scene $NUMBER"
+              exit 1
+            fi
+
+            ORIGINAL_PROMPT=$(jq -r \
+              ".scenes[$i].image_prompt" \
+              payload.json)
+
+            case $(( (NUMBER - 1) % 6 )) in
+              0) CAMERA_MOVE="slow cinematic dolly-in with gentle foreground parallax" ;;
+              1) CAMERA_MOVE="smooth lateral tracking shot, subtle left-to-right movement" ;;
+              2) CAMERA_MOVE="gentle cinematic orbit around the main subject with stable framing" ;;
+              3) CAMERA_MOVE="slow dolly-out reveal, gradually exposing more of the environment" ;;
+              4) CAMERA_MOVE="subtle low-to-high crane movement with layered depth" ;;
+              5) CAMERA_MOVE="steady cinematic push-in with a soft rack-focus feeling from foreground to subject" ;;
+            esac
+
+            MOTION_PROMPT="${ORIGINAL_PROMPT}. Animate this as one shot in a continuous premium cinematic 3D animated film. Camera direction: ${CAMERA_MOVE}. Begin gently and end gently so the next scene can transition smoothly. Use restrained natural character motion, subtle breathing and facial movement where appropriate, environmental motion such as cloth, foliage, dust, light or atmosphere only when appropriate, and realistic depth parallax. Preserve the exact source-image character identity, face, hairstyle, clothing, props, environment and composition. Keep the main subject stable and readable. Avoid abrupt action near the first and last half-second. No sudden morphing, no flicker, no warped faces, no extra limbs, no duplicate subjects, no text, no watermark."
+
+            jq -n \
+              --arg prompt "$MOTION_PROMPT" \
+              --arg image_url "$IMAGE_URL" \
+              '{
+                prompt: $prompt,
+                image_url: $image_url,
+                strength: 1.0,
+                negative: "blurry, low quality, distorted, worst quality, jpeg artifacts, flicker, warped face, deformed hands, extra fingers, extra limbs, duplicate people, morphing, text, watermark"
+              }' > "ltx_request_${NUMBER}.json"
+
+            HTTP_CODE=$(curl -sS \
+              -o "ltx_responses/submit_${NUMBER}.json" \
+              -w "%{http_code}" \
+              -X POST \
+              "$LTX_URL" \
+              -H "Content-Type: application/json" \
+              -H "Ocp-Apim-Subscription-Key: ${PIXAZO_API_KEY}" \
+              --data @"ltx_request_${NUMBER}.json")
+
+            echo "LTX submit HTTP: $HTTP_CODE"
+
+            if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "201" ] && [ "$HTTP_CODE" != "202" ]; then
+
+              echo "LTX submit failed for scene $NUMBER"
+
+              cat "ltx_responses/submit_${NUMBER}.json" || true
+
+              exit 1
+            fi
+
+            POLLING_URL=$(jq -r \
+              '.polling_url // empty' \
+              "ltx_responses/submit_${NUMBER}.json")
+
+            REQUEST_ID=$(jq -r \
+              '.request_id // empty' \
+              "ltx_responses/submit_${NUMBER}.json")
+
+            echo "Request ID: $REQUEST_ID"
+
+            if [ -z "$POLLING_URL" ]; then
+
+              echo "LTX returned no polling URL"
+
+              cat "ltx_responses/submit_${NUMBER}.json"
+
+              exit 1
+            fi
+
+            COMPLETED=false
+
+            for ATTEMPT in $(seq 1 90); do
+
+              echo "Scene $NUMBER poll $ATTEMPT / 90"
+
+              sleep 10
+
+              POLL_HTTP=$(curl -sS \
+                -o "ltx_responses/status_${NUMBER}.json" \
+                -w "%{http_code}" \
+                -H "Ocp-Apim-Subscription-Key: ${PIXAZO_API_KEY}" \
+                "$POLLING_URL")
+
+              echo "Poll HTTP: $POLL_HTTP"
+
+              if [ "$POLL_HTTP" != "200" ]; then
+                echo "Temporary polling response: $POLL_HTTP"
+                continue
+              fi
+
+              STATUS=$(jq -r \
+                '.status // empty' \
+                "ltx_responses/status_${NUMBER}.json")
+
+              echo "LTX status: $STATUS"
+
+              if [ "$STATUS" = "COMPLETED" ]; then
+
+                VIDEO_URL=$(jq -r \
+                  '.output.media_url[0] // empty' \
+                  "ltx_responses/status_${NUMBER}.json")
+
+                if [ -z "$VIDEO_URL" ]; then
+                  echo "Completed but no video URL"
+                  cat "ltx_responses/status_${NUMBER}.json"
+                  exit 1
+                fi
+
+                echo "Downloading AI video scene $NUMBER"
+
+                curl -L --fail \
+                  "$VIDEO_URL" \
+                  -o "ai_clips/raw_${NUMBER}.mp4"
+
+                if [ ! -s "ai_clips/raw_${NUMBER}.mp4" ]; then
+                  echo "AI clip download failed"
+                  exit 1
+                fi
+
+                COMPLETED=true
+
+                break
+              fi
+
+              if [ "$STATUS" = "FAILED" ] || [ "$STATUS" = "ERROR" ]; then
+
+                echo "LTX failed for scene $NUMBER"
+
+                cat "ltx_responses/status_${NUMBER}.json"
+
+                exit 1
+              fi
+
+            done
+
+            if [ "$COMPLETED" != "true" ]; then
+              echo "LTX timed out for scene $NUMBER"
+              exit 1
+            fi
+
+            echo "Normalizing AI clip $NUMBER"
+
+            ffmpeg -y \
+              -i "ai_clips/raw_${NUMBER}.mp4" \
+              -an \
+              -vf "scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,crop=1080:1920,setsar=1,fps=30,format=yuv420p" \
+              -c:v libx264 \
+              -preset medium \
+              -crf 19 \
+              -profile:v high \
+              -pix_fmt yuv420p \
+              -movflags +faststart \
+              "ai_clips/scene_${NUMBER}.mp4"
+
+            if [ ! -s "ai_clips/scene_${NUMBER}.mp4" ]; then
+              echo "Normalized clip failed for scene $NUMBER"
+              exit 1
+            fi
+
+            CLIP_DURATION=$(ffprobe \
+              -v error \
+              -show_entries format=duration \
+              -of default=noprint_wrappers=1:nokey=1 \
+              "ai_clips/scene_${NUMBER}.mp4")
+
+            echo "Scene $NUMBER AI duration: $CLIP_DURATION sec"
+            echo "AI SCENE $NUMBER READY"
+
+            # Gentle delay for fair-use / rate-limit protection
+            sleep 3
+
+          done
+
+          echo "======================================"
+          echo "ALL 15 AI ANIMATED CLIPS READY"
+          echo "======================================"
+
+      # =====================================================
+      # 7. CINEMATIC XFADE TRANSITIONS BETWEEN AI CLIPS
+      # =====================================================
+
+      - name: Join AI animated scenes with cinematic transitions
+        run: |
+          set -euo pipefail
+
+          COUNT=$(jq '.scenes | length' payload.json)
+          TRANSITION=0.55
+
+          python3 <<'PYTHON'
+          import json
+          import subprocess
+
+          with open("payload.json", "r", encoding="utf-8") as f:
+              count = len(json.load(f)["scenes"])
+
+          transition = 0.55
+
+          durations = []
+          for i in range(1, count + 1):
+              out = subprocess.check_output([
+                  "ffprobe", "-v", "error",
+                  "-show_entries", "format=duration",
+                  "-of", "default=noprint_wrappers=1:nokey=1",
+                  f"ai_clips/scene_{i}.mp4"
+              ], text=True).strip()
+              durations.append(float(out))
+
+          # xfade offset is measured on the progressively combined timeline.
+          offsets = []
+          running = durations[0]
+          for i in range(1, count):
+              offset = max(0.05, running - transition)
+              offsets.append(offset)
+              running = running + durations[i] - transition
+
+          filters = []
+          previous = "[0:v]"
+          transitions = [
+              "fade", "smoothleft", "fade", "smoothright",
+              "fade", "circleopen", "fade", "smoothleft"
+          ]
+
+          for i in range(1, count):
+              output = f"[v{i}]"
+              effect = transitions[(i - 1) % len(transitions)]
+              filters.append(
+                  f"{previous}[{i}:v]xfade="
+                  f"transition={effect}:duration={transition}:"
+                  f"offset={offsets[i-1]:.6f}{output}"
+              )
+              previous = output
+
+          with open("xfade_filter.txt", "w", encoding="utf-8") as f:
+              f.write(";".join(filters))
+
+          with open("xfade_output.txt", "w", encoding="utf-8") as f:
+              f.write(previous)
+
+          print("Clip durations:", durations)
+          print("Transition duration:", transition)
+          print("Expected cinematic timeline:", running)
+          PYTHON
+
+          INPUTS=()
+          for i in $(seq 1 "$COUNT"); do
+            INPUTS+=(-i "ai_clips/scene_${i}.mp4")
+          done
+
+          FILTER=$(cat xfade_filter.txt)
+          OUTPUT_LABEL=$(cat xfade_output.txt)
+
+          echo "Creating cinematic xfade timeline..."
+
+          ffmpeg -y             "${INPUTS[@]}"             -filter_complex "$FILTER"             -map "$OUTPUT_LABEL"             -an             -r 30             -c:v libx264             -preset medium             -crf 18             -profile:v high             -pix_fmt yuv420p             -movflags +faststart             ai_video_raw.mp4
+
+          if [ ! -s ai_video_raw.mp4 ]; then
+            echo "Cinematic scene joining failed"
+            exit 1
+          fi
+
+          AI_DURATION=$(ffprobe             -v error             -show_entries format=duration             -of default=noprint_wrappers=1:nokey=1             ai_video_raw.mp4)
+
+          echo "Combined cinematic AI animation duration: $AI_DURATION"
+
+      # =====================================================
+      # 8. SYNC VIDEO LENGTH TO TAMIL NARRATION
+      #
+      # This keeps all 15 generated animations and adjusts
+      # playback speed slightly so the visuals finish with
+      # the narration.
+      # =====================================================
+
+      - name: Sync animation duration with narration
+        run: |
+          set -e
+
+          VIDEO_DURATION=$(ffprobe \
+            -v error \
+            -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 \
+            ai_video_raw.mp4)
+
+          VOICE_DURATION=$(ffprobe \
+            -v error \
+            -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 \
+            narration.mp3)
+
+          TARGET_DURATION=$(awk \
+            -v voice="$VOICE_DURATION" \
+            'BEGIN {
+              printf "%.3f", voice + 1.0
+            }')
+
+          SPEED_FACTOR=$(awk \
+            -v video="$VIDEO_DURATION" \
+            -v target="$TARGET_DURATION" \
+            'BEGIN {
+              printf "%.8f", target / video
+            }')
+
+          echo "Original AI video: $VIDEO_DURATION"
+          echo "Narration: $VOICE_DURATION"
+          echo "Target video: $TARGET_DURATION"
+          echo "Video setpts factor: $SPEED_FACTOR"
+
+          ffmpeg -y \
+            -i ai_video_raw.mp4 \
+            -vf "setpts=${SPEED_FACTOR}*PTS,fps=30,scale=1080:1920:flags=lanczos,setsar=1,format=yuv420p" \
+            -an \
+            -c:v libx264 \
+            -preset medium \
+            -crf 19 \
+            -profile:v high \
+            -pix_fmt yuv420p \
+            -movflags +faststart \
+            ai_video_synced.mp4
+
+          if [ ! -s ai_video_synced.mp4 ]; then
+            echo "Video sync failed"
+            exit 1
+          fi
+
+      # =====================================================
+      # 9. ADD TAMIL NARRATION
+      # =====================================================
+
+      - name: Add Tamil narration
+        run: |
+          set -e
+
+          TOTAL_DURATION=$(ffprobe \
+            -v error \
+            -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 \
+            ai_video_synced.mp4)
+
+          echo "Final visual duration: $TOTAL_DURATION"
+
+          ffmpeg -y \
+            -i ai_video_synced.mp4 \
+            -i narration.mp3 \
+            -filter_complex \
+            "[1:a]apad,atrim=duration=${TOTAL_DURATION},loudnorm=I=-16:LRA=11:TP=-1.5[audio]" \
+            -map 0:v \
+            -map "[audio]" \
+            -t "$TOTAL_DURATION" \
+            -c:v copy \
+            -c:a aac \
+            -b:a 192k \
+            -ar 48000 \
+            -movflags +faststart \
+            telegram-output.mp4
+
+          if [ ! -s telegram-output.mp4 ]; then
+            echo "Final Telegram video creation failed"
+            exit 1
+          fi
+
+      # =====================================================
+      # 10. FINAL QUALITY CHECK
+      # =====================================================
+
+      - name: Check final AI Telegram video
+        run: |
+          set -e
+
+          if [ ! -s telegram-output.mp4 ]; then
+            echo "Final video does not exist"
+            exit 1
+          fi
+
+          echo "======================================"
+          echo "FINAL AI VIDEO INFORMATION"
+          echo "======================================"
+
+          ffprobe \
+            -v error \
+            -show_entries format=duration,size,bit_rate \
+            -show_streams \
+            telegram-output.mp4
+
+      # =====================================================
+      # 11. UPLOAD ARTIFACT
+      # =====================================================
+
+      - name: Upload Telegram AI video artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: telegram-ai-video-v2
+          path: telegram-output.mp4
+          retention-days: 1
+
+      # =====================================================
+      # 12. RESUME N8N
+      # =====================================================
+
+      - name: Resume n8n
+        if: always()
+        env:
+          RESUME_URL: ${{ inputs.resumeUrl }}
+        run: |
+          if [ -n "${RESUME_URL:-}" ]; then
+
+            curl -sS -X POST \
+              -H "Content-Type: application/json" \
+              -d "{\"status\":\"${{ job.status }}\",\"artifact\":\"telegram-ai-video-v2\"}" \
+              "$RESUME_URL" || true
+
+          else
+
+            echo "resumeUrl is empty"
+
+          fi
