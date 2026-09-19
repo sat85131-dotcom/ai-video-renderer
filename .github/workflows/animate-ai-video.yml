@@ -201,6 +201,7 @@ jobs:
 
           cat > generate_tts.py <<'PYTHON'
           import os
+          import time
           import wave
           from google import genai
           from google.genai import types
@@ -241,21 +242,43 @@ jobs:
           {narration}
           """
 
-          response = client.models.generate_content(
-              model="gemini-2.5-flash-preview-tts",
-              contents=prompt,
-              config=types.GenerateContentConfig(
-                  temperature=1,
-                  response_modalities=["AUDIO"],
-                  speech_config=types.SpeechConfig(
-                      voice_config=types.VoiceConfig(
-                          prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                              voice_name="Zephyr"
-                          )
-                      )
-                  ),
-              ),
-          )
+          response = None
+          last_error = None
+          retry_delays = [30, 60, 90]
+
+          for attempt in range(1, 5):
+              try:
+                  print(f"Gemini TTS attempt {attempt}/4")
+                  response = client.models.generate_content(
+                      model="gemini-2.5-flash-preview-tts",
+                      contents=prompt,
+                      config=types.GenerateContentConfig(
+                          temperature=1,
+                          response_modalities=["AUDIO"],
+                          speech_config=types.SpeechConfig(
+                              voice_config=types.VoiceConfig(
+                                  prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                                      voice_name="Zephyr"
+                                  )
+                              )
+                          ),
+                      ),
+                  )
+                  print("Gemini TTS request successful")
+                  break
+              except Exception as exc:
+                  last_error = exc
+                  print(f"Gemini TTS attempt {attempt} failed: {exc}")
+                  if attempt == 4:
+                      raise RuntimeError(
+                          f"Gemini TTS failed after 4 attempts: {last_error}"
+                      ) from exc
+                  wait_seconds = retry_delays[attempt - 1]
+                  print(f"Waiting {wait_seconds} seconds before retry...")
+                  time.sleep(wait_seconds)
+
+          if response is None:
+              raise RuntimeError(f"Gemini TTS failed without a response: {last_error}")
 
           audio_data = None
 
