@@ -1,0 +1,63 @@
+name: Pixazo LTX Video Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-video:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Generate AI animated video
+        env:
+          PIXAZO_API_KEY: ${{ secrets.PIXAZO_API_KEY }}
+        run: |
+          RESPONSE=$(curl -sS -X POST \
+            "https://gateway.pixazo.ai/ltx-video/v1/image-to-video" \
+            -H "Content-Type: application/json" \
+            -H "Ocp-Apim-Subscription-Key: $PIXAZO_API_KEY" \
+            --data-raw '{
+              "prompt": "Cinematic gentle natural movement, subtle environmental motion, smooth camera push-in, realistic depth and lighting",
+              "image_url": "https://pub-582b7213209642b9b995c96c95a30381.r2.dev/doc-assets/images/input.jpg",
+              "strength": 0.9
+            }')
+
+          echo "$RESPONSE" | jq .
+
+          POLL_URL=$(echo "$RESPONSE" | jq -r '.polling_url // empty')
+
+          if [ -z "$POLL_URL" ]; then
+            echo "No polling URL returned"
+            exit 1
+          fi
+
+          for i in {1..60}; do
+            sleep 10
+
+            STATUS_RESPONSE=$(curl -sS \
+              -H "Ocp-Apim-Subscription-Key: $PIXAZO_API_KEY" \
+              "$POLL_URL")
+
+            echo "$STATUS_RESPONSE" | jq .
+
+            STATUS=$(echo "$STATUS_RESPONSE" | jq -r '.status')
+
+            if [ "$STATUS" = "COMPLETED" ]; then
+              VIDEO_URL=$(echo "$STATUS_RESPONSE" | jq -r '.output.media_url[0]')
+              curl -L "$VIDEO_URL" -o ltx-test.mp4
+              break
+            fi
+
+            if [ "$STATUS" = "FAILED" ] || [ "$STATUS" = "ERROR" ]; then
+              echo "Video generation failed"
+              exit 1
+            fi
+          done
+
+          test -s ltx-test.mp4
+
+      - name: Upload test video
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixazo-ltx-video-test
+          path: ltx-test.mp4
