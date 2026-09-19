@@ -1,0 +1,60 @@
+name: Pixazo HD Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-pixazo:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Generate test image with Pixazo Flux Schnell
+        env:
+          PIXAZO_API_KEY: ${{ secrets.PIXAZO_API_KEY }}
+        run: |
+          set -e
+
+          echo "Generating Pixazo test image..."
+
+          RESPONSE=$(curl -sS -w "\n%{http_code}" \
+            -X POST "https://gateway.pixazo.ai/flux-1-schnell/v1/getData" \
+            -H "Content-Type: application/json" \
+            -H "Cache-Control: no-cache" \
+            -H "Ocp-Apim-Subscription-Key: $PIXAZO_API_KEY" \
+            --data-raw '{
+              "prompt": "Bright cinematic 3D animated scene of a peaceful futuristic city at golden hour, highly detailed, vibrant natural lighting, sharp focus, professional composition, clean image, high quality",
+              "num_steps": 4,
+              "seed": 85131,
+              "height": 1024,
+              "width": 1024
+            }')
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+
+          echo "Pixazo HTTP: $HTTP_CODE"
+          echo "$BODY"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Pixazo request failed"
+            exit 1
+          fi
+
+          IMAGE_URL=$(echo "$BODY" | jq -r '.output // .image // .url // empty')
+
+          if [ -z "$IMAGE_URL" ]; then
+            echo "No image URL returned"
+            exit 1
+          fi
+
+          echo "Downloading generated image..."
+          curl -L --fail "$IMAGE_URL" -o pixazo-test.png
+
+          test -s pixazo-test.png
+
+      - name: Upload Pixazo test image
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixazo-hd-test
+          path: pixazo-test.png
+          retention-days: 1
