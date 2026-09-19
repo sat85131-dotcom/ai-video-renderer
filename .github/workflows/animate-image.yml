@@ -48,11 +48,13 @@ jobs:
             exit 1
           fi
 
-      - name: Generate HD scene images with Cloudflare + Pollinations fallback
+      - name: Generate HD scene images with Cloudflare + Pollinations + Pixazo fallback
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           POLLINATIONS_API_KEY: ${{ secrets.POLLINATIONS_API_KEY }}
+          PIXAZO_API_KEY: ${{ secrets.PIXAZO_API_KEY }}
         run: |
+          set -e
           mkdir -p scenes
 
           COUNT=$(jq '.scenes | length' payload.json)
@@ -65,6 +67,7 @@ jobs:
 
           CF_URL="https://api.cloudflare.com/client/v4/accounts/058021d96073d8aa330a8e9348a949ba/ai/run/@cf/black-forest-labs/flux-1-schnell"
           POLL_URL="https://gen.pollinations.ai/v1/images/generations"
+          PIXAZO_URL="https://gateway.pixazo.ai/flux-1-schnell/v1/getData"
 
           for i in $(seq 0 $((COUNT - 1))); do
 
@@ -82,183 +85,262 @@ jobs:
 
             NORMAL_PROMPT="${PROMPT}. Family-friendly cinematic 3D animated film scene. Non-graphic and age-appropriate. Premium animation quality, detailed textures, professional cinematic lighting, vibrant natural colors, crisp focus, strong depth, vertical-friendly composition, centered main subject, no text, no watermark."
 
-            jq -n \
-              --arg prompt "$NORMAL_PROMPT" \
-              '{
-                prompt: $prompt,
-                steps: 8
-              }' > "request_${NUMBER}.json"
-
-            HTTP_CODE=$(curl -sS \
-              -o "response_${NUMBER}.json" \
-              -w "%{http_code}" \
-              -X POST \
-              "$CF_URL" \
-              -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-              -H "Content-Type: application/json" \
-              --data @"request_${NUMBER}.json")
-
-            echo "Cloudflare HTTP: $HTTP_CODE"
-
+            SOURCE_READY=false
             USE_POLLINATIONS=false
-
-            # Cloudflare quota reached -> Pollinations fallback
-            if [ "$HTTP_CODE" = "429" ]; then
-              echo "======================================"
-              echo "CLOUDFLARE QUOTA EXHAUSTED"
-              echo "Switching to Pollinations fallback"
-              echo "======================================"
-
-              USE_POLLINATIONS=true
-            fi
-
-            # Handle other Cloudflare errors
-            if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "429" ]; then
-
-              RESPONSE=$(cat "response_${NUMBER}.json")
-
-              if echo "$RESPONSE" | grep -qiE 'NSFW|8007|unsafe|safety'; then
-
-                echo "Cloudflare safety filter triggered."
-                echo "Trying one neutral Cloudflare replacement."
-
-                SAFE_PROMPT="A peaceful family-friendly cinematic 3D animated environment for an educational YouTube story. Beautiful atmospheric scenery, warm cinematic lighting, colorful detailed surroundings, premium animated movie quality, crisp focus, strong depth, harmless age-appropriate imagery, vertical-friendly composition, centered visual subject, calm positive atmosphere, no text, no watermark."
-
-                jq -n \
-                  --arg prompt "$SAFE_PROMPT" \
-                  '{
-                    prompt: $prompt,
-                    steps: 8
-                  }' > "safe_request_${NUMBER}.json"
-
-                SAFE_HTTP=$(curl -sS \
-                  -o "safe_response_${NUMBER}.json" \
-                  -w "%{http_code}" \
-                  -X POST \
-                  "$CF_URL" \
-                  -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-                  -H "Content-Type: application/json" \
-                  --data @"safe_request_${NUMBER}.json")
-
-                echo "Safe Cloudflare HTTP: $SAFE_HTTP"
-
-                if [ "$SAFE_HTTP" = "200" ]; then
-
-                  cp "safe_response_${NUMBER}.json" \
-                     "response_${NUMBER}.json"
-
-                  HTTP_CODE="200"
-
-                elif [ "$SAFE_HTTP" = "429" ]; then
-
-                  echo "Cloudflare quota reached during safe retry."
-                  echo "Switching to Pollinations."
-
-                  USE_POLLINATIONS=true
-
-                else
-
-                  echo "Cloudflare safe retry failed."
-                  echo "Switching to Pollinations."
-
-                  USE_POLLINATIONS=true
-                fi
-
-              else
-
-                echo "Cloudflare failed."
-                echo "Switching to Pollinations."
-
-                USE_POLLINATIONS=true
-              fi
-            fi
+            USE_PIXAZO=false
 
             # ==========================================
-            # POLLINATIONS FALLBACK
+            # 1. CLOUDFLARE PRIMARY
             # ==========================================
 
-            if [ "$USE_POLLINATIONS" = "true" ]; then
-
-              if [ -z "$POLLINATIONS_API_KEY" ]; then
-                echo "POLLINATIONS_API_KEY is missing"
-                exit 1
-              fi
-
-              echo "Generating scene $NUMBER with Pollinations FLUX..."
+            if [ -n "$CLOUDFLARE_API_TOKEN" ]; then
 
               jq -n \
                 --arg prompt "$NORMAL_PROMPT" \
                 '{
                   prompt: $prompt,
-                  model: "black-forest-labs/flux.1-schnell",
-                  n: 1,
-                  size: "1024x1024",
-                  quality: "high",
-                  response_format: "b64_json"
-                }' > "poll_request_${NUMBER}.json"
+                  steps: 8
+                }' > "request_${NUMBER}.json"
 
-              POLL_HTTP=$(curl -sS \
-                -o "poll_response_${NUMBER}.json" \
+              HTTP_CODE=$(curl -sS \
+                -o "response_${NUMBER}.json" \
                 -w "%{http_code}" \
                 -X POST \
-                "$POLL_URL" \
-                -H "Authorization: Bearer ${POLLINATIONS_API_KEY}" \
+                "$CF_URL" \
+                -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
                 -H "Content-Type: application/json" \
-                --data @"poll_request_${NUMBER}.json")
+                --data @"request_${NUMBER}.json")
 
-              echo "Pollinations HTTP: $POLL_HTTP"
+              echo "Cloudflare HTTP: $HTTP_CODE"
 
-              if [ "$POLL_HTTP" != "200" ]; then
-                echo "Pollinations fallback failed for scene $NUMBER"
-                cat "poll_response_${NUMBER}.json"
-                exit 1
+              if [ "$HTTP_CODE" = "200" ]; then
+
+                IMAGE_BASE64=$(jq -r \
+                  '.result.image // empty' \
+                  "response_${NUMBER}.json")
+
+                if [ -n "$IMAGE_BASE64" ]; then
+                  printf '%s' "$IMAGE_BASE64" \
+                    | base64 --decode \
+                    > "scenes/scene_${NUMBER}_source.jpg"
+
+                  SOURCE_READY=true
+                  echo "Cloudflare scene $NUMBER generated successfully"
+                else
+                  echo "Cloudflare returned no image."
+                  USE_POLLINATIONS=true
+                fi
+
+              elif [ "$HTTP_CODE" = "429" ]; then
+
+                echo "======================================"
+                echo "CLOUDFLARE QUOTA EXHAUSTED"
+                echo "Switching to Pollinations"
+                echo "======================================"
+
+                USE_POLLINATIONS=true
+
+              else
+
+                RESPONSE=$(cat "response_${NUMBER}.json")
+
+                if echo "$RESPONSE" | grep -qiE 'NSFW|8007|unsafe|safety'; then
+
+                  echo "Cloudflare safety filter triggered."
+                  echo "Trying one neutral Cloudflare replacement."
+
+                  SAFE_PROMPT="A peaceful family-friendly cinematic 3D animated environment for an educational YouTube story. Beautiful atmospheric scenery, warm cinematic lighting, colorful detailed surroundings, premium animated movie quality, crisp focus, strong depth, harmless age-appropriate imagery, vertical-friendly composition, centered visual subject, calm positive atmosphere, no text, no watermark."
+
+                  jq -n \
+                    --arg prompt "$SAFE_PROMPT" \
+                    '{
+                      prompt: $prompt,
+                      steps: 8
+                    }' > "safe_request_${NUMBER}.json"
+
+                  SAFE_HTTP=$(curl -sS \
+                    -o "safe_response_${NUMBER}.json" \
+                    -w "%{http_code}" \
+                    -X POST \
+                    "$CF_URL" \
+                    -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+                    -H "Content-Type: application/json" \
+                    --data @"safe_request_${NUMBER}.json")
+
+                  echo "Safe Cloudflare HTTP: $SAFE_HTTP"
+
+                  if [ "$SAFE_HTTP" = "200" ]; then
+
+                    SAFE_BASE64=$(jq -r \
+                      '.result.image // empty' \
+                      "safe_response_${NUMBER}.json")
+
+                    if [ -n "$SAFE_BASE64" ]; then
+                      printf '%s' "$SAFE_BASE64" \
+                        | base64 --decode \
+                        > "scenes/scene_${NUMBER}_source.jpg"
+
+                      SOURCE_READY=true
+                      echo "Safe Cloudflare scene $NUMBER generated successfully"
+                    else
+                      USE_POLLINATIONS=true
+                    fi
+
+                  else
+                    echo "Cloudflare safe retry failed."
+                    USE_POLLINATIONS=true
+                  fi
+
+                else
+                  echo "Cloudflare failed."
+                  USE_POLLINATIONS=true
+                fi
               fi
-
-              IMAGE_BASE64=$(jq -r \
-                '.data[0].b64_json // empty' \
-                "poll_response_${NUMBER}.json")
-
-              if [ -z "$IMAGE_BASE64" ]; then
-                echo "Pollinations returned no image for scene $NUMBER"
-                cat "poll_response_${NUMBER}.json"
-                exit 1
-              fi
-
-              printf '%s' "$IMAGE_BASE64" \
-                | base64 --decode \
-                > "scenes/scene_${NUMBER}_source.jpg"
-
-              echo "Pollinations scene $NUMBER generated successfully"
 
             else
+              echo "Cloudflare key missing."
+              USE_POLLINATIONS=true
+            fi
 
-              # ==========================================
-              # CLOUDFLARE IMAGE
-              # ==========================================
+            # ==========================================
+            # 2. POLLINATIONS FALLBACK
+            # ==========================================
 
-              IMAGE_BASE64=$(jq -r \
-                '.result.image // empty' \
-                "response_${NUMBER}.json")
+            if [ "$SOURCE_READY" != "true" ] && [ "$USE_POLLINATIONS" = "true" ]; then
 
-              if [ -z "$IMAGE_BASE64" ]; then
-                echo "Cloudflare returned no image for scene $NUMBER"
-                cat "response_${NUMBER}.json"
+              if [ -n "$POLLINATIONS_API_KEY" ]; then
+
+                echo "Generating scene $NUMBER with Pollinations FLUX..."
+
+                jq -n \
+                  --arg prompt "$NORMAL_PROMPT" \
+                  '{
+                    prompt: $prompt,
+                    model: "black-forest-labs/flux.1-schnell",
+                    n: 1,
+                    size: "1024x1024",
+                    quality: "high",
+                    response_format: "b64_json"
+                  }' > "poll_request_${NUMBER}.json"
+
+                POLL_HTTP=$(curl -sS \
+                  -o "poll_response_${NUMBER}.json" \
+                  -w "%{http_code}" \
+                  -X POST \
+                  "$POLL_URL" \
+                  -H "Authorization: Bearer ${POLLINATIONS_API_KEY}" \
+                  -H "Content-Type: application/json" \
+                  --data @"poll_request_${NUMBER}.json")
+
+                echo "Pollinations HTTP: $POLL_HTTP"
+
+                if [ "$POLL_HTTP" = "200" ]; then
+
+                  IMAGE_BASE64=$(jq -r \
+                    '.data[0].b64_json // empty' \
+                    "poll_response_${NUMBER}.json")
+
+                  if [ -n "$IMAGE_BASE64" ]; then
+
+                    printf '%s' "$IMAGE_BASE64" \
+                      | base64 --decode \
+                      > "scenes/scene_${NUMBER}_source.jpg"
+
+                    SOURCE_READY=true
+                    echo "Pollinations scene $NUMBER generated successfully"
+
+                  else
+                    echo "Pollinations returned no image."
+                    USE_PIXAZO=true
+                  fi
+
+                else
+                  echo "Pollinations failed for scene $NUMBER."
+                  cat "poll_response_${NUMBER}.json" || true
+                  echo "Switching to Pixazo."
+                  USE_PIXAZO=true
+                fi
+
+              else
+                echo "Pollinations key missing."
+                USE_PIXAZO=true
+              fi
+            fi
+
+            # ==========================================
+            # 3. PIXAZO FALLBACK
+            # ==========================================
+
+            if [ "$SOURCE_READY" != "true" ]; then
+
+              USE_PIXAZO=true
+
+              if [ -z "$PIXAZO_API_KEY" ]; then
+                echo "PIXAZO_API_KEY is missing"
                 exit 1
               fi
 
-              printf '%s' "$IMAGE_BASE64" \
-                | base64 --decode \
-                > "scenes/scene_${NUMBER}_source.jpg"
+              echo "======================================"
+              echo "GENERATING SCENE $NUMBER WITH PIXAZO"
+              echo "======================================"
 
-              echo "Cloudflare scene $NUMBER generated successfully"
+              jq -n \
+                --arg prompt "$NORMAL_PROMPT" \
+                '{
+                  prompt: $prompt,
+                  num_steps: 4,
+                  seed: 85131,
+                  height: 1024,
+                  width: 1024
+                }' > "pixazo_request_${NUMBER}.json"
+
+              PIXAZO_HTTP=$(curl -sS \
+                -o "pixazo_response_${NUMBER}.json" \
+                -w "%{http_code}" \
+                -X POST \
+                "$PIXAZO_URL" \
+                -H "Content-Type: application/json" \
+                -H "Cache-Control: no-cache" \
+                -H "Ocp-Apim-Subscription-Key: ${PIXAZO_API_KEY}" \
+                --data @"pixazo_request_${NUMBER}.json")
+
+              echo "Pixazo HTTP: $PIXAZO_HTTP"
+
+              if [ "$PIXAZO_HTTP" != "200" ]; then
+                echo "Pixazo fallback failed for scene $NUMBER"
+                cat "pixazo_response_${NUMBER}.json" || true
+                exit 1
+              fi
+
+              PIXAZO_IMAGE_URL=$(jq -r \
+                '.output // .image // .url // empty' \
+                "pixazo_response_${NUMBER}.json")
+
+              if [ -z "$PIXAZO_IMAGE_URL" ]; then
+                echo "Pixazo returned no image URL for scene $NUMBER"
+                cat "pixazo_response_${NUMBER}.json" || true
+                exit 1
+              fi
+
+              curl -L --fail \
+                "$PIXAZO_IMAGE_URL" \
+                -o "scenes/scene_${NUMBER}_source.jpg"
+
+              if [ ! -s "scenes/scene_${NUMBER}_source.jpg" ]; then
+                echo "Pixazo image download failed for scene $NUMBER"
+                exit 1
+              fi
+
+              SOURCE_READY=true
+              echo "Pixazo scene $NUMBER generated successfully"
             fi
 
             # ==========================================
             # VALIDATE SOURCE IMAGE
             # ==========================================
 
-            if [ ! -s "scenes/scene_${NUMBER}_source.jpg" ]; then
-              echo "Image generation failed for scene $NUMBER"
+            if [ "$SOURCE_READY" != "true" ] || [ ! -s "scenes/scene_${NUMBER}_source.jpg" ]; then
+              echo "All image providers failed for scene $NUMBER"
               exit 1
             fi
 
@@ -284,7 +366,7 @@ jobs:
           echo "======================================"
           echo "ALL 15 TELEGRAM SCENES READY"
           echo "======================================"
-          
+
       - name: Create Tamil narration with Gemini TTS
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -511,7 +593,7 @@ jobs:
             -show_entries format=duration,size,bit_rate \
             -show_streams \
             telegram-output.mp4
-            
+
       - name: Upload Telegram video artifact
         uses: actions/upload-artifact@v4
         with:
