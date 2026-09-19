@@ -396,28 +396,28 @@ jobs:
             -b:a 192k \
             -ar 48000 \
             -movflags +faststart \
-            output.mp4
+            telegram-output.mp4
 
-      - name: Check final video
+      - name: Check final Telegram video
         run: |
-          if [ ! -s output.mp4 ]; then
-            echo "Final video was not created"
+          if [ ! -s telegram-output.mp4 ]; then
+            echo "Final Telegram video was not created"
             exit 1
           fi
 
-          echo "Final video information"
+          echo "Final Telegram video information"
 
           ffprobe \
             -v error \
             -show_entries format=duration,size,bit_rate \
             -show_streams \
-            output.mp4
-
-      - name: Upload video artifact
+            telegram-output.mp4
+            
+      - name: Upload Telegram video artifact
         uses: actions/upload-artifact@v4
         with:
-          name: animated-video
-          path: output.mp4
+          name: telegram-video
+          path: telegram-output.mp4
           retention-days: 1
 
       - name: Resume n8n
