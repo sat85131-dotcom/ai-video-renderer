@@ -1,0 +1,13 @@
+name: Animate Telegram Image - Backup
+
+on:
+  workflow_dispatch:
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Backup workflow
+        run: |
+          echo "RSK ON LIVE - Animate Telegram Image backup workflow"
+          echo "This workflow is stored as a safe backup."
