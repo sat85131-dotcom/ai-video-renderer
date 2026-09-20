@@ -12,12 +12,15 @@ jobs:
   render:
     runs-on: ubuntu-latest
 
+    env:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
     steps:
       - name: Install tools
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg fonts-noto-core fonts-noto-extra
-          python3 -m pip install --upgrade edge-tts
+          python3 -m pip install --upgrade requests
 
       - name: Save scenes JSON
         env:
@@ -26,30 +29,29 @@ jobs:
           printf '%s' "$SCENES_JSON" > scenes.json
           python3 -m json.tool scenes.json
 
-      - name: Render all scenes
+      - name: Render all scenes with Gemini Tamil TTS
         run: |
           python3 <<'PY'
+          import base64
           import json
           import os
           import re
           import subprocess
-          import edge_tts
+          import time
+          import wave
+          import requests
 
-          ENGLISH_VOICE = "en-US-AriaNeural"
-          TTS_RATE = "+4%"
-          TTS_PITCH = "+0Hz"
-          TTS_VOLUME = "+0%"
+          GEMINI_MODEL = "gemini-2.5-flash-preview-tts"
+          GEMINI_VOICE = "Zephyr"
 
           with open("scenes.json", "r", encoding="utf-8") as f:
               scenes = json.load(f)
 
           os.makedirs("segments", exist_ok=True)
 
-          def normalize_spoken_english(text):
+          def normalize_spoken_tamil(text):
               text = str(text or "").strip()
-              text = text.replace("…", ".")
-              text = text.replace("—", ",")
-              text = text.replace("–", ",")
+              text = text.replace("…", ".").replace("—", ",").replace("–", ",")
               text = re.sub(r"\.{2,}", ".", text)
               text = re.sub(r",\s*,+", ", ", text)
               text = re.sub(r"\s*;\s*", ", ", text)
@@ -57,84 +59,112 @@ jobs:
               text = re.sub(r"\s+", " ", text)
               return text.strip()
 
-          def seconds_from_ticks(value):
-              return float(value) / 10_000_000.0
+          def write_pcm_wav(pcm_bytes, output_wav, sample_rate=24000):
+              with wave.open(output_wav, "wb") as wf:
+                  wf.setnchannels(1)
+                  wf.setsampwidth(2)
+                  wf.setframerate(sample_rate)
+                  wf.writeframes(pcm_bytes)
 
-          def make_voice_with_timings(text, output):
-              spoken_text = normalize_spoken_english(text)
+          def make_voice(text, output_mp3):
+              spoken_text = normalize_spoken_tamil(text)
+              api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+              if not api_key:
+                  raise RuntimeError("GEMINI_API_KEY secret is missing")
 
-              communicate = edge_tts.Communicate(
-                  spoken_text,
-                  voice=ENGLISH_VOICE,
-                  rate=TTS_RATE,
-                  pitch=TTS_PITCH,
-                  volume=TTS_VOLUME,
+              url = (
+                  "https://generativelanguage.googleapis.com/v1beta/models/"
+                  f"{GEMINI_MODEL}:generateContent?key={api_key}"
               )
+              payload = {
+                  "contents": [{
+                      "parts": [{
+                          "text": (
+                              "Speak the following exactly as written. "
+                              "Use a warm, natural, conversational Tamil female YouTube storyteller voice. "
+                              "Use authentic native Tamil pronunciation, friendly energy, relaxed pacing, "
+                              "and natural expression. Do not translate, summarize, add, or remove words.\n\n"
+                              + spoken_text
+                          )
+                      }]
+                  }],
+                  "generationConfig": {
+                      "responseModalities": ["AUDIO"],
+                      "speechConfig": {
+                          "voiceConfig": {
+                              "prebuiltVoiceConfig": {"voiceName": GEMINI_VOICE}
+                          }
+                      }
+                  }
+              }
 
-              words = []
+              last_error = None
+              for attempt in range(1, 4):
+                  try:
+                      response = requests.post(url, json=payload, timeout=120)
+                      if response.status_code == 200:
+                          data = response.json()
+                          inline = data["candidates"][0]["content"]["parts"][0]["inlineData"]
+                          audio_bytes = base64.b64decode(inline["data"])
+                          mime = inline.get("mimeType", "").lower()
 
-              with open(output, "wb") as audio_file:
-                  for chunk in communicate.stream_sync():
-                      if chunk["type"] == "audio":
-                          audio_file.write(chunk["data"])
-                      elif chunk["type"] == "WordBoundary":
-                          word = str(chunk.get("text", "")).strip()
-                          if not word:
-                              continue
+                          wav_file = output_mp3.replace(".mp3", ".wav")
 
-                          start = seconds_from_ticks(chunk["offset"])
-                          duration = seconds_from_ticks(chunk["duration"])
+                          if "wav" in mime:
+                              with open(wav_file, "wb") as f:
+                                  f.write(audio_bytes)
+                          elif "mpeg" in mime or "mp3" in mime:
+                              with open(output_mp3, "wb") as f:
+                                  f.write(audio_bytes)
+                              return spoken_text
+                          else:
+                              # Gemini TTS normally returns 24 kHz mono 16-bit PCM.
+                              write_pcm_wav(audio_bytes, wav_file, 24000)
 
-                          words.append({
-                              "text": word,
-                              "start": start,
-                              "end": start + max(duration, 0.06),
-                          })
+                          subprocess.run([
+                              "ffmpeg", "-y", "-i", wav_file,
+                              "-c:a", "libmp3lame", "-b:a", "192k",
+                              "-ar", "48000", "-ac", "2", output_mp3
+                          ], check=True)
 
-              if not os.path.exists(output) or os.path.getsize(output) == 0:
-                  raise RuntimeError("English TTS created no audio")
+                          if not os.path.exists(output_mp3) or os.path.getsize(output_mp3) == 0:
+                              raise RuntimeError("Gemini TTS created no audio")
+                          return spoken_text
 
-              return spoken_text, words
+                      last_error = RuntimeError(
+                          f"Gemini TTS HTTP {response.status_code}: {response.text[:1000]}"
+                      )
+                  except Exception as exc:
+                      last_error = exc
 
+                  if attempt < 3:
+                      print(f"Gemini TTS attempt {attempt} failed. Retrying...")
+                      time.sleep(attempt * 3)
+
+              raise RuntimeError(f"Gemini TTS failed after 3 attempts: {last_error}")
 
           def build_fallback_timings(spoken_text, audio_duration):
-              # Fallback when Edge TTS returns audio but no WordBoundary events.
               tokens = [t for t in re.split(r"\s+", spoken_text.strip()) if t]
-
               if not tokens:
                   return []
-
               usable_duration = max(float(audio_duration) - 0.10, 0.20)
-
               weights = []
               for token in tokens:
-                  cleaned = re.sub(r"[^\w]", "", token)
+                  cleaned = re.sub(r"[^\w\u0B80-\u0BFF]", "", token, flags=re.UNICODE)
                   weights.append(max(len(cleaned), 1))
-
               total_weight = sum(weights)
               cursor = 0.0
               words = []
-
               for index, (token, weight) in enumerate(zip(tokens, weights)):
                   share = usable_duration * (weight / total_weight)
                   start = cursor
-
-                  if index == len(tokens) - 1:
-                      end = usable_duration
-                  else:
-                      end = min(usable_duration, cursor + max(share, 0.08))
-
+                  end = usable_duration if index == len(tokens) - 1 else min(
+                      usable_duration, cursor + max(share, 0.08)
+                  )
                   if end <= start:
                       end = min(usable_duration, start + 0.08)
-
-                  words.append({
-                      "text": token.strip(),
-                      "start": start,
-                      "end": end,
-                  })
-
+                  words.append({"text": token.strip(), "start": start, "end": end})
                   cursor = end
-
               return words
 
           def ass_time(seconds):
@@ -145,68 +175,45 @@ jobs:
 
           def escape_ass(text):
               return (
-                  str(text)
-                  .replace("\\", r"\\")
-                  .replace("{", r"\{")
-                  .replace("}", r"\}")
-                  .replace("\n", " ")
-                  .strip()
+                  str(text).replace("\\", r"\\").replace("{", r"\{")
+                  .replace("}", r"\}").replace("\n", " ").strip()
               )
 
           def create_ass(words, output_file):
               lines = [
-                  "[Script Info]",
-                  "ScriptType: v4.00+",
-                  "PlayResX: 1080",
-                  "PlayResY: 1920",
-                  "WrapStyle: 2",
-                  "ScaledBorderAndShadow: yes",
-                  "",
+                  "[Script Info]", "ScriptType: v4.00+", "PlayResX: 1080",
+                  "PlayResY: 1920", "WrapStyle: 2", "ScaledBorderAndShadow: yes", "",
                   "[V4+ Styles]",
                   "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding",
-                  "Style: Default,Noto Sans,66,&H00FFFFFF,&H00FFFFFF,&H00000000,&H70000000,-1,0,0,0,100,100,0,0,1,5,1,2,65,65,305,1",
-                  "",
-                  "[Events]",
+                  "Style: Default,Noto Sans Tamil,66,&H00FFFFFF,&H00FFFFFF,&H00000000,&H70000000,-1,0,0,0,100,100,0,0,1,5,1,2,65,65,305,1",
+                  "", "[Events]",
                   "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text",
               ]
-
               chunk_size = 2
-
               for index, word in enumerate(words):
                   group_start = (index // chunk_size) * chunk_size
                   group_end = min(group_start + chunk_size, len(words))
                   group = words[group_start:group_end]
-
                   display_words = []
-
                   for local_index, item in enumerate(group):
                       actual_index = group_start + local_index
                       safe_word = escape_ass(item["text"])
-
                       if actual_index == index:
                           display_words.append(
-                              r"{\1c&H0000FF00&\b1}" +
-                              safe_word +
-                              r"{\1c&H00FFFFFF&\b1}"
+                              r"{\1c&H0000FF00&\b1}" + safe_word + r"{\1c&H00FFFFFF&\b1}"
                           )
                       else:
-                          display_words.append(
-                              r"{\1c&H00FFFFFF&\b1}" + safe_word
-                          )
-
+                          display_words.append(r"{\1c&H00FFFFFF&\b1}" + safe_word)
                   caption = " ".join(display_words)
                   start = float(word["start"])
-
                   if index + 1 < len(words):
                       end = max(float(words[index + 1]["start"]), start + 0.08)
                   else:
                       end = max(float(word["end"]) + 0.08, start + 0.10)
-
                   lines.append(
                       f"Dialogue: 0,{ass_time(start)},{ass_time(end)},"
                       f"Default,,0,0,0,,{{\\an2}}{caption}"
                   )
-
               with open(output_file, "w", encoding="utf-8-sig") as f:
                   f.write("\n".join(lines))
 
@@ -235,55 +242,39 @@ jobs:
                   "--retry-delay", "2", video_url, "-o", source_video
               ], check=True)
 
-              print("Generating natural English voice + exact TTS timings...")
-              spoken_text, words = make_voice_with_timings(voice_text, voice_file)
-
+              print("Generating natural Tamil Gemini TTS with Zephyr...")
+              spoken_text = make_voice(voice_text, voice_file)
               print("TTS text:", spoken_text)
-              print(f"Scene {i}: {len(words)} Edge TTS word boundaries")
 
               duration = float(subprocess.check_output([
                   "ffprobe", "-v", "error", "-show_entries", "format=duration",
                   "-of", "default=noprint_wrappers=1:nokey=1", voice_file
               ]).decode().strip())
 
+              words = build_fallback_timings(spoken_text, duration)
               if not words:
-                  print("No WordBoundary events. Using audio-duration fallback timings...")
-                  words = build_fallback_timings(spoken_text, duration)
-                  print(f"Scene {i}: {len(words)} fallback caption words")
-
-              if not words:
-                  raise RuntimeError(f"Scene {i}: could not build caption timings")
-
+                  raise RuntimeError(f"Scene {i}: could not build Tamil caption timings")
               create_ass(words, subtitle_file)
 
               scene_duration = duration + 0.12
               print(f"Voice duration: {duration:.2f}s")
 
-              subtitle_filter = (
-                  f"subtitles='{subtitle_file}':fontsdir='/usr/share/fonts'"
-              )
-
+              subtitle_filter = f"subtitles='{subtitle_file}':fontsdir='/usr/share/fonts'"
               zoom_filter = (
                   "zoompan="
                   "z='min(zoom+0.0007,1.05)':"
                   "x='iw/2-(iw/zoom/2)':"
                   "y='ih/2-(ih/zoom/2)':"
-                  "d=1:"
-                  "s=1080x1920:"
-                  "fps=30,"
+                  "d=1:s=1080x1920:fps=30,"
               )
-
               video_filter = (
                   "scale=1080:1920:force_original_aspect_ratio=increase,"
-                  "crop=1080:1920,"
-                  + zoom_filter +
+                  "crop=1080:1920," + zoom_filter +
                   "eq=contrast=1.06:saturation=1.10:brightness=0.01,"
-                  + subtitle_filter +
-                  ",format=yuv420p"
+                  + subtitle_filter + ",format=yuv420p"
               )
 
               print("Rendering scene...")
-
               subprocess.run([
                   "ffmpeg", "-y",
                   "-stream_loop", "-1", "-i", source_video,
@@ -294,11 +285,10 @@ jobs:
                   "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
                   "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
                   "-af", "apad=pad_dur=0.12",
-                  "-movflags", "+faststart",
-                  output_file
+                  "-movflags", "+faststart", output_file
               ], check=True)
 
-          print("ALL SCENES RENDERED")
+          print("ALL TAMIL GEMINI TTS SCENES RENDERED")
           PY
 
       - name: Join scenes with dynamic transitions
