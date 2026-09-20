@@ -9,7 +9,7 @@ on:
         type: string
       resumeUrl:
         description: "n8n callback URL"
-        required: true
+        required: false
         type: string
 
 jobs:
