@@ -20,7 +20,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg fonts-noto-core fonts-noto-extra
-          python3 -m pip install --upgrade requests
+          python3 -m pip install --upgrade requests edge-tts
 
       - name: Save scenes JSON
         env:
@@ -40,6 +40,7 @@ jobs:
           import time
           import wave
           import requests
+          import edge_tts
 
           GEMINI_MODEL = "gemini-2.5-flash-preview-tts"
           GEMINI_VOICE = "Zephyr"
@@ -65,6 +66,21 @@ jobs:
                   wf.setsampwidth(2)
                   wf.setframerate(sample_rate)
                   wf.writeframes(pcm_bytes)
+
+          def make_edge_fallback_voice(text, output_mp3):
+              spoken_text = normalize_spoken_tamil(text)
+              print("Using Tamil Edge TTS fallback: ta-IN-PallaviNeural")
+              communicate = edge_tts.Communicate(
+                  spoken_text,
+                  voice="ta-IN-PallaviNeural",
+                  rate="+0%",
+                  pitch="+0Hz",
+                  volume="+0%"
+              )
+              communicate.save_sync(output_mp3)
+              if not os.path.exists(output_mp3) or os.path.getsize(output_mp3) == 0:
+                  raise RuntimeError("Tamil fallback TTS created no audio")
+              return spoken_text
 
           def make_voice(text, output_mp3):
               spoken_text = normalize_spoken_tamil(text)
@@ -141,7 +157,9 @@ jobs:
                       print(f"Gemini TTS attempt {attempt} failed. Retrying...")
                       time.sleep(attempt * 3)
 
-              raise RuntimeError(f"Gemini TTS failed after 3 attempts: {last_error}")
+              print(f"Gemini TTS unavailable after 3 attempts: {last_error}")
+              print("Falling back to Tamil Edge TTS so the video can continue...")
+              return make_edge_fallback_voice(spoken_text, output_mp3)
 
           def build_fallback_timings(spoken_text, audio_duration):
               tokens = [t for t in re.split(r"\s+", spoken_text.strip()) if t]
