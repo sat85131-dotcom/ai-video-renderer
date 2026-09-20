@@ -29,7 +29,7 @@ jobs:
           printf '%s' "$SCENES_JSON" > scenes.json
           python3 -m json.tool scenes.json
 
-      - name: Render scenes with alternating Gemini Tamil voices
+      - name: Render scenes with 2-request Gemini Tamil voices
         run: |
           python3 <<'PY'
           import base64
@@ -44,6 +44,7 @@ jobs:
           GEMINI_MODEL = "gemini-2.5-flash-preview-tts"
           FEMALE_GEMINI_VOICE = "Despina"
           MALE_GEMINI_VOICE = "Enceladus"
+          MARKER_GAP = 1.0
 
           with open("scenes.json", "r", encoding="utf-8") as f:
               scenes = json.load(f)
@@ -67,29 +68,32 @@ jobs:
                   wf.setframerate(sample_rate)
                   wf.writeframes(pcm_bytes)
 
-          def make_voice(text, output_mp3, voice_name, voice_style):
-              spoken_text = normalize_spoken_tamil(text)
+          def gemini_voice_batch(texts, output_mp3, voice_name, voice_style):
               api_key = os.environ.get("GEMINI_API_KEY", "").strip()
               if not api_key:
                   raise RuntimeError("GEMINI_API_KEY secret is missing")
+
+              numbered = []
+              for n, text in enumerate(texts, start=1):
+                  numbered.append(f"PART {n}: {normalize_spoken_tamil(text)}")
+
+              script = "\n\n".join(numbered)
+              prompt = (
+                  "Create one continuous Tamil narration audio from the numbered PARTS below. "
+                  f"Use a {voice_style} Tamil YouTube storyteller voice. "
+                  "Speak ONLY the actual sentence after each PART label; do NOT speak the words PART or the numbers. "
+                  f"Insert exactly about {MARKER_GAP:.0f} second of clean silence between every part. "
+                  "Do not add music, sound effects, commentary, translations, or extra words. "
+                  "Use authentic native Tamil pronunciation, warm conversational delivery, "
+                  "friendly energy, relaxed pacing, and natural expression.\n\n" + script
+              )
 
               url = (
                   "https://generativelanguage.googleapis.com/v1beta/models/"
                   f"{GEMINI_MODEL}:generateContent?key={api_key}"
               )
               payload = {
-                  "contents": [{
-                      "parts": [{
-                          "text": (
-                              "Speak the following exactly as written. "
-                              f"Use a {voice_style} Tamil YouTube storyteller voice. "
-                              "Use authentic native Tamil pronunciation, warm conversational delivery, "
-                              "friendly energy, relaxed pacing, and natural expression. "
-                              "Do not translate, summarize, add, or remove words.\n\n"
-                              + spoken_text
-                          )
-                      }]
-                  }],
+                  "contents": [{"parts": [{"text": prompt}]}],
                   "generationConfig": {
                       "responseModalities": ["AUDIO"],
                       "speechConfig": {
@@ -103,13 +107,12 @@ jobs:
               last_error = None
               for attempt in range(1, 4):
                   try:
-                      response = requests.post(url, json=payload, timeout=120)
+                      response = requests.post(url, json=payload, timeout=180)
                       if response.status_code == 200:
                           data = response.json()
                           inline = data["candidates"][0]["content"]["parts"][0]["inlineData"]
                           audio_bytes = base64.b64decode(inline["data"])
                           mime = inline.get("mimeType", "").lower()
-
                           wav_file = output_mp3.replace(".mp3", ".wav")
 
                           if "wav" in mime:
@@ -118,9 +121,8 @@ jobs:
                           elif "mpeg" in mime or "mp3" in mime:
                               with open(output_mp3, "wb") as f:
                                   f.write(audio_bytes)
-                              return spoken_text
+                              return
                           else:
-                              # Gemini TTS normally returns 24 kHz mono 16-bit PCM.
                               write_pcm_wav(audio_bytes, wav_file, 24000)
 
                           subprocess.run([
@@ -128,10 +130,7 @@ jobs:
                               "-c:a", "libmp3lame", "-b:a", "192k",
                               "-ar", "48000", "-ac", "2", output_mp3
                           ], check=True)
-
-                          if not os.path.exists(output_mp3) or os.path.getsize(output_mp3) == 0:
-                              raise RuntimeError("Gemini TTS created no audio")
-                          return spoken_text
+                          return
 
                       last_error = RuntimeError(
                           f"Gemini TTS HTTP {response.status_code}: {response.text[:1000]}"
@@ -140,12 +139,62 @@ jobs:
                       last_error = exc
 
                   if attempt < 3:
-                      print(f"Gemini TTS attempt {attempt} failed. Retrying...")
+                      print(f"Gemini {voice_name} batch attempt {attempt} failed. Retrying...")
                       time.sleep(attempt * 3)
 
               raise RuntimeError(
-                  f"Gemini TTS unavailable after 3 attempts for voice {voice_name}: {last_error}"
+                  f"Gemini TTS unavailable after 3 attempts for {voice_name}: {last_error}"
               )
+
+          def split_on_silence(input_file, expected_parts, prefix):
+              detect = subprocess.run([
+                  "ffmpeg", "-hide_banner", "-i", input_file,
+                  "-af", "silencedetect=noise=-38dB:d=0.45",
+                  "-f", "null", "-"
+              ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+
+              starts = [float(x) for x in re.findall(r"silence_start: ([0-9.]+)", detect.stderr)]
+              ends = [float(x) for x in re.findall(r"silence_end: ([0-9.]+)", detect.stderr)]
+
+              gaps = []
+              for s, e in zip(starts, ends):
+                  if e - s >= 0.45 and s > 0.05:
+                      gaps.append((s, e))
+
+              duration = float(subprocess.check_output([
+                  "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                  "-of", "default=noprint_wrappers=1:nokey=1", input_file
+              ]).decode().strip())
+
+              # Pick the longest internal silences if Gemini produced extra natural pauses.
+              gaps = sorted(gaps, key=lambda g: g[1] - g[0], reverse=True)[:max(expected_parts - 1, 0)]
+              gaps = sorted(gaps)
+
+              if len(gaps) != expected_parts - 1:
+                  raise RuntimeError(
+                      f"{prefix}: expected {expected_parts - 1} separator silences, found {len(gaps)}. "
+                      "Refusing an unsafe split that could cut speech."
+                  )
+
+              boundaries = [0.0]
+              for s, e in gaps:
+                  boundaries.append((s + e) / 2.0)
+              boundaries.append(duration)
+
+              outputs = []
+              for idx in range(expected_parts):
+                  start = boundaries[idx]
+                  end = boundaries[idx + 1]
+                  out = f"segments/{prefix}_{idx + 1:02d}.mp3"
+                  subprocess.run([
+                      "ffmpeg", "-y", "-i", input_file,
+                      "-ss", f"{start:.3f}", "-to", f"{end:.3f}",
+                      "-af", "silenceremove=start_periods=1:start_duration=0.05:start_threshold=-45dB:"
+                             "stop_periods=1:stop_duration=0.10:stop_threshold=-45dB",
+                      "-c:a", "libmp3lame", "-b:a", "192k", "-ar", "48000", "-ac", "2", out
+                  ], check=True)
+                  outputs.append(out)
+              return outputs
 
           def build_fallback_timings(spoken_text, audio_duration):
               tokens = [t for t in re.split(r"\s+", spoken_text.strip()) if t]
@@ -221,10 +270,41 @@ jobs:
               with open(output_file, "w", encoding="utf-8-sig") as f:
                   f.write("\n".join(lines))
 
+          odd_scenes = [(i, s) for i, s in enumerate(scenes, start=1) if i % 2 == 1]
+          even_scenes = [(i, s) for i, s in enumerate(scenes, start=1) if i % 2 == 0]
+
+          print("Generating female batch: ONE Gemini request")
+          gemini_voice_batch(
+              [s.get("voice_text", "") for _, s in odd_scenes],
+              "segments/female_batch.mp3",
+              FEMALE_GEMINI_VOICE,
+              "natural, warm, energetic female"
+          )
+          female_parts = split_on_silence(
+              "segments/female_batch.mp3", len(odd_scenes), "female_part"
+          )
+
+          print("Generating male batch: ONE Gemini request")
+          gemini_voice_batch(
+              [s.get("voice_text", "") for _, s in even_scenes],
+              "segments/male_batch.mp3",
+              MALE_GEMINI_VOICE,
+              "natural, warm, energetic male"
+          )
+          male_parts = split_on_silence(
+              "segments/male_batch.mp3", len(even_scenes), "male_part"
+          )
+
+          voice_by_scene = {}
+          for (scene_no, _), path in zip(odd_scenes, female_parts):
+              voice_by_scene[scene_no] = path
+          for (scene_no, _), path in zip(even_scenes, male_parts):
+              voice_by_scene[scene_no] = path
+
           for i, scene in enumerate(scenes, start=1):
               number = str(i).zfill(2)
               video_url = scene.get("video_url")
-              voice_text = str(scene.get("voice_text", "")).strip()
+              voice_text = normalize_spoken_tamil(scene.get("voice_text", ""))
 
               if not video_url:
                   raise RuntimeError(f"Scene {i}: video_url missing")
@@ -232,7 +312,7 @@ jobs:
                   raise RuntimeError(f"Scene {i}: voice_text missing")
 
               source_video = f"segments/source_{number}.mp4"
-              voice_file = f"segments/voice_{number}.mp3"
+              voice_file = voice_by_scene[i]
               subtitle_file = os.path.abspath(f"segments/subtitle_{number}.ass")
               output_file = f"segments/scene_{number}.mp4"
 
@@ -246,31 +326,16 @@ jobs:
                   "--retry-delay", "2", video_url, "-o", source_video
               ], check=True)
 
-              if i % 2 == 1:
-                  print(f"Voice A: Gemini {FEMALE_GEMINI_VOICE} female (odd scene)")
-                  spoken_text = make_voice(
-                      voice_text,
-                      voice_file,
-                      FEMALE_GEMINI_VOICE,
-                      "natural, warm, energetic female"
-                  )
-              else:
-                  print(f"Voice B: Gemini {MALE_GEMINI_VOICE} male (even scene)")
-                  spoken_text = make_voice(
-                      voice_text,
-                      voice_file,
-                      MALE_GEMINI_VOICE,
-                      "natural, warm, energetic male"
-                  )
-
-              print("TTS text:", spoken_text)
+              print(
+                  f"Voice: {FEMALE_GEMINI_VOICE if i % 2 == 1 else MALE_GEMINI_VOICE}"
+              )
 
               duration = float(subprocess.check_output([
                   "ffprobe", "-v", "error", "-show_entries", "format=duration",
                   "-of", "default=noprint_wrappers=1:nokey=1", voice_file
               ]).decode().strip())
 
-              words = build_fallback_timings(spoken_text, duration)
+              words = build_fallback_timings(voice_text, duration)
               if not words:
                   raise RuntimeError(f"Scene {i}: could not build Tamil caption timings")
               create_ass(words, subtitle_file)
@@ -307,7 +372,7 @@ jobs:
                   "-movflags", "+faststart", output_file
               ], check=True)
 
-          print("ALL DUAL-VOICE TAMIL GEMINI TTS SCENES RENDERED")
+          print("ALL 8 SCENES RENDERED WITH ONLY 2 GEMINI TTS REQUESTS")
           PY
 
       - name: Join scenes with dynamic transitions
