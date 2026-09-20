@@ -44,6 +44,7 @@ jobs:
 
           GEMINI_MODEL = "gemini-2.5-flash-preview-tts"
           GEMINI_VOICE = "Zephyr"
+          MALE_EDGE_VOICE = "ta-IN-ValluvarNeural"
 
           with open("scenes.json", "r", encoding="utf-8") as f:
               scenes = json.load(f)
@@ -67,12 +68,12 @@ jobs:
                   wf.setframerate(sample_rate)
                   wf.writeframes(pcm_bytes)
 
-          def make_edge_fallback_voice(text, output_mp3):
+          def make_edge_voice(text, output_mp3, voice_name):
               spoken_text = normalize_spoken_tamil(text)
-              print("Using Tamil Edge TTS fallback: ta-IN-PallaviNeural")
+              print(f"Using Tamil Edge TTS: {voice_name}")
               communicate = edge_tts.Communicate(
                   spoken_text,
-                  voice="ta-IN-PallaviNeural",
+                  voice=voice_name,
                   rate="+0%",
                   pitch="+0Hz",
                   volume="+0%"
@@ -159,7 +160,7 @@ jobs:
 
               print(f"Gemini TTS unavailable after 3 attempts: {last_error}")
               print("Falling back to Tamil Edge TTS so the video can continue...")
-              return make_edge_fallback_voice(spoken_text, output_mp3)
+              return make_edge_voice(spoken_text, output_mp3, "ta-IN-PallaviNeural")
 
           def build_fallback_timings(spoken_text, audio_duration):
               tokens = [t for t in re.split(r"\s+", spoken_text.strip()) if t]
@@ -260,8 +261,17 @@ jobs:
                   "--retry-delay", "2", video_url, "-o", source_video
               ], check=True)
 
-              print("Generating natural Tamil Gemini TTS with Zephyr...")
-              spoken_text = make_voice(voice_text, voice_file)
+              if i % 2 == 1:
+                  print("Voice A: Gemini Zephyr (odd scene)")
+                  spoken_text = make_voice(voice_text, voice_file)
+              else:
+                  print(f"Voice B: Tamil male {MALE_EDGE_VOICE} (even scene)")
+                  spoken_text = make_edge_voice(
+                      voice_text,
+                      voice_file,
+                      MALE_EDGE_VOICE
+                  )
+
               print("TTS text:", spoken_text)
 
               duration = float(subprocess.check_output([
