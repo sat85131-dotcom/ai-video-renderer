@@ -693,17 +693,13 @@ jobs:
       # 12. RESUME N8N
       # =====================================================
 
-      - name: Resume n8n
+      - name: Notify n8n final video ready
         if: always()
-        env:
-          RESUME_URL: ${{ inputs.resumeUrl }}
         run: |
-          if [ -n "${RESUME_URL:-}" ]; then
-
-            curl -sS -X POST \
-              -H "Content-Type: application/json" \
-              -d "{\"status\":\"${{ job.status }}\",\"artifact\":\"telegram-ai-video-v3\"}" \
-              "$RESUME_URL" || true
+          curl -sS -X POST \
+            -H "Content-Type: application/json" \
+            -d "{\"status\":\"${{ job.status }}\",\"run_id\":\"${{ github.run_id }}\",\"artifact\":\"telegram-ai-video-v3\"}" \
+            "https://sat85131.app.n8n.cloud/webhook/github-v3-finished" || true
 
           else
 
