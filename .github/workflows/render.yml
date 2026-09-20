@@ -20,7 +20,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg fonts-noto-core fonts-noto-extra
-          python3 -m pip install --upgrade requests edge-tts
+          python3 -m pip install --upgrade requests
 
       - name: Save scenes JSON
         env:
@@ -29,7 +29,7 @@ jobs:
           printf '%s' "$SCENES_JSON" > scenes.json
           python3 -m json.tool scenes.json
 
-      - name: Render all scenes with Gemini Tamil TTS
+      - name: Render scenes with alternating Gemini Tamil voices
         run: |
           python3 <<'PY'
           import base64
@@ -40,11 +40,10 @@ jobs:
           import time
           import wave
           import requests
-          import edge_tts
 
           GEMINI_MODEL = "gemini-2.5-flash-preview-tts"
-          GEMINI_VOICE = "Zephyr"
-          MALE_EDGE_VOICE = "ta-IN-ValluvarNeural"
+          FEMALE_GEMINI_VOICE = "Despina"
+          MALE_GEMINI_VOICE = "Enceladus"
 
           with open("scenes.json", "r", encoding="utf-8") as f:
               scenes = json.load(f)
@@ -68,22 +67,7 @@ jobs:
                   wf.setframerate(sample_rate)
                   wf.writeframes(pcm_bytes)
 
-          def make_edge_voice(text, output_mp3, voice_name):
-              spoken_text = normalize_spoken_tamil(text)
-              print(f"Using Tamil Edge TTS: {voice_name}")
-              communicate = edge_tts.Communicate(
-                  spoken_text,
-                  voice=voice_name,
-                  rate="+0%",
-                  pitch="+0Hz",
-                  volume="+0%"
-              )
-              communicate.save_sync(output_mp3)
-              if not os.path.exists(output_mp3) or os.path.getsize(output_mp3) == 0:
-                  raise RuntimeError("Tamil fallback TTS created no audio")
-              return spoken_text
-
-          def make_voice(text, output_mp3):
+          def make_voice(text, output_mp3, voice_name, voice_style):
               spoken_text = normalize_spoken_tamil(text)
               api_key = os.environ.get("GEMINI_API_KEY", "").strip()
               if not api_key:
@@ -98,9 +82,10 @@ jobs:
                       "parts": [{
                           "text": (
                               "Speak the following exactly as written. "
-                              "Use a warm, natural, conversational Tamil female YouTube storyteller voice. "
-                              "Use authentic native Tamil pronunciation, friendly energy, relaxed pacing, "
-                              "and natural expression. Do not translate, summarize, add, or remove words.\n\n"
+                              f"Use a {voice_style} Tamil YouTube storyteller voice. "
+                              "Use authentic native Tamil pronunciation, warm conversational delivery, "
+                              "friendly energy, relaxed pacing, and natural expression. "
+                              "Do not translate, summarize, add, or remove words.\n\n"
                               + spoken_text
                           )
                       }]
@@ -109,7 +94,7 @@ jobs:
                       "responseModalities": ["AUDIO"],
                       "speechConfig": {
                           "voiceConfig": {
-                              "prebuiltVoiceConfig": {"voiceName": GEMINI_VOICE}
+                              "prebuiltVoiceConfig": {"voiceName": voice_name}
                           }
                       }
                   }
@@ -158,9 +143,9 @@ jobs:
                       print(f"Gemini TTS attempt {attempt} failed. Retrying...")
                       time.sleep(attempt * 3)
 
-              print(f"Gemini TTS unavailable after 3 attempts: {last_error}")
-              print("Falling back to Tamil Edge TTS so the video can continue...")
-              return make_edge_voice(spoken_text, output_mp3, "ta-IN-PallaviNeural")
+              raise RuntimeError(
+                  f"Gemini TTS unavailable after 3 attempts for voice {voice_name}: {last_error}"
+              )
 
           def build_fallback_timings(spoken_text, audio_duration):
               tokens = [t for t in re.split(r"\s+", spoken_text.strip()) if t]
@@ -262,14 +247,20 @@ jobs:
               ], check=True)
 
               if i % 2 == 1:
-                  print("Voice A: Gemini Zephyr (odd scene)")
-                  spoken_text = make_voice(voice_text, voice_file)
-              else:
-                  print(f"Voice B: Tamil male {MALE_EDGE_VOICE} (even scene)")
-                  spoken_text = make_edge_voice(
+                  print(f"Voice A: Gemini {FEMALE_GEMINI_VOICE} female (odd scene)")
+                  spoken_text = make_voice(
                       voice_text,
                       voice_file,
-                      MALE_EDGE_VOICE
+                      FEMALE_GEMINI_VOICE,
+                      "natural, warm, energetic female"
+                  )
+              else:
+                  print(f"Voice B: Gemini {MALE_GEMINI_VOICE} male (even scene)")
+                  spoken_text = make_voice(
+                      voice_text,
+                      voice_file,
+                      MALE_GEMINI_VOICE,
+                      "natural, warm, energetic male"
                   )
 
               print("TTS text:", spoken_text)
@@ -316,7 +307,7 @@ jobs:
                   "-movflags", "+faststart", output_file
               ], check=True)
 
-          print("ALL TAMIL GEMINI TTS SCENES RENDERED")
+          print("ALL DUAL-VOICE TAMIL GEMINI TTS SCENES RENDERED")
           PY
 
       - name: Join scenes with dynamic transitions
