@@ -186,13 +186,28 @@ jobs:
                   start = boundaries[idx]
                   end = boundaries[idx + 1]
                   out = f"segments/{prefix}_{idx + 1:02d}.mp3"
+                  clip_duration = max(end - start, 0.20)
                   subprocess.run([
-                      "ffmpeg", "-y", "-i", input_file,
-                      "-ss", f"{start:.3f}", "-to", f"{end:.3f}",
-                      "-af", "silenceremove=start_periods=1:start_duration=0.05:start_threshold=-45dB:"
-                             "stop_periods=1:stop_duration=0.10:stop_threshold=-45dB",
-                      "-c:a", "libmp3lame", "-b:a", "192k", "-ar", "48000", "-ac", "2", out
+                      "ffmpeg", "-y",
+                      "-ss", f"{start:.3f}",
+                      "-i", input_file,
+                      "-t", f"{clip_duration:.3f}",
+                      "-c:a", "libmp3lame", "-b:a", "192k",
+                      "-ar", "48000", "-ac", "2", out
                   ], check=True)
+
+                  if not os.path.exists(out) or os.path.getsize(out) < 1000:
+                      raise RuntimeError(f"{prefix}: invalid split audio: {out}")
+
+                  part_duration = float(subprocess.check_output([
+                      "ffprobe", "-v", "error",
+                      "-show_entries", "format=duration",
+                      "-of", "default=noprint_wrappers=1:nokey=1", out
+                  ]).decode().strip())
+
+                  if part_duration < 0.20:
+                      raise RuntimeError(f"{prefix}: split audio too short: {out}")
+
                   outputs.append(out)
               return outputs
 
