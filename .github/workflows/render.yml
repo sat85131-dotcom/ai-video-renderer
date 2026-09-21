@@ -149,7 +149,7 @@ jobs:
           def split_on_silence(input_file, expected_parts, prefix):
               detect = subprocess.run([
                   "ffmpeg", "-hide_banner", "-i", input_file,
-                  "-af", "silencedetect=noise=-38dB:d=0.45",
+                  "-af", "silencedetect=noise=-32dB:d=0.15",
                   "-f", "null", "-"
               ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
 
@@ -158,7 +158,7 @@ jobs:
 
               gaps = []
               for s, e in zip(starts, ends):
-                  if e - s >= 0.45 and s > 0.05:
+                  if e - s >= 0.15 and s > 0.05:
                       gaps.append((s, e))
 
               duration = float(subprocess.check_output([
@@ -172,8 +172,8 @@ jobs:
 
               if len(gaps) != expected_parts - 1:
                   raise RuntimeError(
-                      f"{prefix}: expected {expected_parts - 1} separator silences, found {len(gaps)}. "
-                      "Refusing an unsafe split that could cut speech."
+                      f"{prefix}: expected {expected_parts - 1} separator pauses, found {len(gaps)}. "
+                      "Gemini did not leave enough detectable pauses to split safely."
                   )
 
               boundaries = [0.0]
