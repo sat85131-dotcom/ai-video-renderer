@@ -186,13 +186,46 @@ jobs:
                   start = boundaries[idx]
                   end = boundaries[idx + 1]
                   out = f"segments/{prefix}_{idx + 1:02d}.mp3"
+                  if end - start < 0.20:
+                      raise RuntimeError(
+                          f"{prefix} part {idx + 1}: split duration too short ({end-start:.3f}s)"
+                      )
+
+                  # Use atrim + fresh MP3 encoding. Do NOT run silenceremove here:
+                  # it could erase an entire short segment and leave an invalid MP3.
+                  audio_filter = (
+                      f"atrim=start={start:.3f}:end={end:.3f},"
+                      "asetpts=PTS-STARTPTS,"
+                      "aresample=48000"
+                  )
                   subprocess.run([
                       "ffmpeg", "-y", "-i", input_file,
-                      "-ss", f"{start:.3f}", "-to", f"{end:.3f}",
-                      "-af", "silenceremove=start_periods=1:start_duration=0.05:start_threshold=-45dB:"
-                             "stop_periods=1:stop_duration=0.10:stop_threshold=-45dB",
+                      "-vn", "-af", audio_filter,
                       "-c:a", "libmp3lame", "-b:a", "192k", "-ar", "48000", "-ac", "2", out
                   ], check=True)
+
+                  if not os.path.exists(out) or os.path.getsize(out) < 1000:
+                      raise RuntimeError(
+                          f"{prefix} part {idx + 1}: output audio is missing or empty"
+                      )
+
+                  try:
+                      part_duration = float(subprocess.check_output([
+                          "ffprobe", "-v", "error",
+                          "-show_entries", "format=duration",
+                          "-of", "default=noprint_wrappers=1:nokey=1", out
+                      ]).decode().strip())
+                  except Exception as exc:
+                      raise RuntimeError(
+                          f"{prefix} part {idx + 1}: generated MP3 failed validation: {exc}"
+                      )
+
+                  if part_duration < 0.20:
+                      raise RuntimeError(
+                          f"{prefix} part {idx + 1}: validated audio is too short ({part_duration:.3f}s)"
+                      )
+
+                  print(f"{prefix} part {idx + 1}: valid MP3, {part_duration:.2f}s")
                   outputs.append(out)
               return outputs
 
@@ -372,7 +405,7 @@ jobs:
                   "-movflags", "+faststart", output_file
               ], check=True)
 
-          print("ALL 8 SCENES RENDERED WITH ONLY 2 GEMINI TTS REQUESTS")
+          print("ALL 8 SCENES RENDERED WITH 2 GEMINI TTS REQUESTS + VALIDATED AUDIO SPLITS")
           PY
 
       - name: Join scenes with dynamic transitions
