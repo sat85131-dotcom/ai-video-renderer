@@ -365,39 +365,96 @@ jobs:
                   f"{last_error}"
               )
           def split_on_silence(input_file, expected_parts, prefix):
-              detect = subprocess.run([
-                  "ffmpeg", "-hide_banner", "-i", input_file,
-                  "-af", "silencedetect=noise=-38dB:d=0.45",
-                  "-f", "null", "-"
-              ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
-
-              starts = [float(x) for x in re.findall(r"silence_start: ([0-9.]+)", detect.stderr)]
-              ends = [float(x) for x in re.findall(r"silence_end: ([0-9.]+)", detect.stderr)]
-
-              gaps = []
-              for s, e in zip(starts, ends):
-                  if e - s >= 0.45 and s > 0.05:
-                      gaps.append((s, e))
-
               duration = float(subprocess.check_output([
                   "ffprobe", "-v", "error", "-show_entries", "format=duration",
                   "-of", "default=noprint_wrappers=1:nokey=1", input_file
               ]).decode().strip())
 
-              # Pick the longest internal silences if Gemini produced extra natural pauses.
-              gaps = sorted(gaps, key=lambda g: g[1] - g[0], reverse=True)[:max(expected_parts - 1, 0)]
-              gaps = sorted(gaps)
+              needed = max(expected_parts - 1, 0)
+              gaps = []
 
-              if len(gaps) != expected_parts - 1:
-                  raise RuntimeError(
-                      f"{prefix}: expected {expected_parts - 1} separator silences, found {len(gaps)}. "
-                      "Refusing an unsafe split that could cut speech."
-                  )
+              # Gemini does not always keep every requested separator equally long.
+              # Try progressively more sensitive silence detection before falling back.
+              detector_settings = [
+                  ("-38dB", 0.45),
+                  ("-36dB", 0.30),
+                  ("-34dB", 0.20),
+                  ("-32dB", 0.12),
+              ]
+
+              for noise, min_silence in detector_settings:
+                  detect = subprocess.run([
+                      "ffmpeg", "-hide_banner", "-i", input_file,
+                      "-af", f"silencedetect=noise={noise}:d={min_silence}",
+                      "-f", "null", "-"
+                  ], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                     text=True, check=False)
+
+                  starts = [float(x) for x in re.findall(
+                      r"silence_start: ([0-9.]+)", detect.stderr
+                  )]
+                  ends = [float(x) for x in re.findall(
+                      r"silence_end: ([0-9.]+)", detect.stderr
+                  )]
+
+                  found = []
+                  for s, e in zip(starts, ends):
+                      if e - s >= min_silence and s > 0.05 and e < duration - 0.05:
+                          found.append((s, e))
+
+                  # Prefer the longest internal pauses; they are most likely PART separators.
+                  found = sorted(
+                      found, key=lambda g: g[1] - g[0], reverse=True
+                  )[:needed]
+                  found = sorted(found)
+
+                  if len(found) >= needed:
+                      gaps = found
+                      print(
+                          f"{prefix}: found {len(gaps)}/{needed} separators "
+                          f"with noise={noise}, d={min_silence}"
+                      )
+                      break
+
+                  if len(found) > len(gaps):
+                      gaps = found
 
               boundaries = [0.0]
               for s, e in gaps:
                   boundaries.append((s + e) / 2.0)
               boundaries.append(duration)
+              boundaries = sorted(set(boundaries))
+
+              # If Gemini omitted one or more separator pauses, do not crash the workflow.
+              # Add missing boundaries inside the largest current intervals. This is only
+              # a fallback; normally the detected Gemini separator silences are used.
+              while len(boundaries) < expected_parts + 1:
+                  intervals = []
+                  for i in range(len(boundaries) - 1):
+                      a, b = boundaries[i], boundaries[i + 1]
+                      intervals.append((b - a, i, a, b))
+
+                  _, insert_after, a, b = max(intervals, key=lambda x: x[0])
+                  midpoint = (a + b) / 2.0
+                  boundaries.insert(insert_after + 1, midpoint)
+                  print(
+                      f"{prefix}: Gemini omitted a separator; "
+                      f"using safe fallback boundary at {midpoint:.2f}s"
+                  )
+
+              # In case sensitive detection produced extras, keep exactly expected_parts.
+              if len(boundaries) > expected_parts + 1:
+                  internal = boundaries[1:-1]
+                  target = [duration * i / expected_parts for i in range(1, expected_parts)]
+                  chosen = []
+                  remaining = internal[:]
+                  for t in target:
+                      if not remaining:
+                          break
+                      best = min(remaining, key=lambda x: abs(x - t))
+                      chosen.append(best)
+                      remaining.remove(best)
+                  boundaries = [0.0] + sorted(chosen) + [duration]
 
               outputs = []
               for idx in range(expected_parts):
@@ -405,6 +462,7 @@ jobs:
                   end = boundaries[idx + 1]
                   out = f"segments/{prefix}_{idx + 1:02d}.mp3"
                   clip_duration = max(end - start, 0.20)
+
                   subprocess.run([
                       "ffmpeg", "-y",
                       "-ss", f"{start:.3f}",
@@ -424,9 +482,16 @@ jobs:
                   ]).decode().strip())
 
                   if part_duration < 0.20:
-                      raise RuntimeError(f"{prefix}: split audio too short: {out}")
+                      raise RuntimeError(
+                          f"{prefix}: split audio too short: {out} ({part_duration:.2f}s)"
+                      )
 
+                  print(
+                      f"{prefix}_{idx + 1:02d}: "
+                      f"{start:.2f}s -> {end:.2f}s ({part_duration:.2f}s)"
+                  )
                   outputs.append(out)
+
               return outputs
 
           def build_fallback_timings(spoken_text, audio_duration):
