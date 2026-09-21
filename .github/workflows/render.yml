@@ -20,7 +20,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg fonts-noto-core fonts-noto-extra
-          python3 -m pip install --upgrade requests
+          python3 -m pip install --upgrade edge-tts
 
       - name: Save scenes JSON
         env:
@@ -29,20 +29,17 @@ jobs:
           printf '%s' "$SCENES_JSON" > scenes.json
           python3 -m json.tool scenes.json
 
-      - name: Render scenes with single Gemini Tamil female voice
+      - name: Render scenes with free Tamil female voice
         run: |
           python3 <<'PY'
-          import base64
           import json
           import os
           import re
           import subprocess
           import time
-          import wave
-          import requests
+          import edge_tts
 
-          GEMINI_MODEL = "gemini-2.5-flash-preview-tts"
-          FEMALE_GEMINI_VOICE = "Despina"
+          FEMALE_VOICE = "ta-IN-PallaviNeural"
                     MARKER_GAP = 1.0
 
           with open("scenes.json", "r", encoding="utf-8") as f:
@@ -60,173 +57,35 @@ jobs:
               text = re.sub(r"\s+", " ", text)
               return text.strip()
 
-          def write_pcm_wav(pcm_bytes, output_wav, sample_rate=24000):
-              with wave.open(output_wav, "wb") as wf:
-                  wf.setnchannels(1)
-                  wf.setsampwidth(2)
-                  wf.setframerate(sample_rate)
-                  wf.writeframes(pcm_bytes)
+          def make_voice(text, output_mp3):
+              spoken_text = normalize_spoken_tamil(text)
+              if not spoken_text:
+                  raise RuntimeError("Tamil voice text is empty")
 
-          def gemini_voice_batch(texts, output_mp3, voice_name, voice_style):
-              api_key = os.environ.get("GEMINI_API_KEY", "").strip()
-              if not api_key:
-                  raise RuntimeError("GEMINI_API_KEY secret is missing")
-
-              numbered = []
-              for n, text in enumerate(texts, start=1):
-                  numbered.append(f"PART {n}: {normalize_spoken_tamil(text)}")
-
-              script = "\n\n".join(numbered)
-              prompt = (
-                  "Create one continuous Tamil narration audio from the numbered PARTS below. "
-                  f"Use a {voice_style} Tamil YouTube storyteller voice. "
-                  "Speak ONLY the actual sentence after each PART label; do NOT speak the words PART or the numbers. "
-                  f"Insert exactly about {MARKER_GAP:.0f} second of clean silence between every part. "
-                  "Do not add music, sound effects, commentary, translations, or extra words. "
-                  "Use authentic native Tamil pronunciation, warm conversational delivery, "
-                  "friendly energy, relaxed pacing, and natural expression.\n\n" + script
+              print(f"Generating Tamil female voice with {FEMALE_VOICE}")
+              communicate = edge_tts.Communicate(
+                  spoken_text,
+                  voice=FEMALE_VOICE,
+                  rate="+0%",
+                  pitch="+0Hz",
+                  volume="+0%"
               )
+              communicate.save_sync(output_mp3)
 
-              url = (
-                  "https://generativelanguage.googleapis.com/v1beta/models/"
-                  f"{GEMINI_MODEL}:generateContent?key={api_key}"
-              )
-              payload = {
-                  "contents": [{"parts": [{"text": prompt}]}],
-                  "generationConfig": {
-                      "responseModalities": ["AUDIO"],
-                      "speechConfig": {
-                          "voiceConfig": {
-                              "prebuiltVoiceConfig": {"voiceName": voice_name}
-                          }
-                      }
-                  }
-              }
-
-              last_error = None
-              for attempt in range(1, 4):
-                  try:
-                      response = requests.post(url, json=payload, timeout=180)
-                      if response.status_code == 200:
-                          data = response.json()
-                          inline = data["candidates"][0]["content"]["parts"][0]["inlineData"]
-                          audio_bytes = base64.b64decode(inline["data"])
-                          mime = inline.get("mimeType", "").lower()
-                          wav_file = output_mp3.replace(".mp3", ".wav")
-
-                          if "wav" in mime:
-                              with open(wav_file, "wb") as f:
-                                  f.write(audio_bytes)
-                          elif "mpeg" in mime or "mp3" in mime:
-                              with open(output_mp3, "wb") as f:
-                                  f.write(audio_bytes)
-                              return
-                          else:
-                              write_pcm_wav(audio_bytes, wav_file, 24000)
-
-                          subprocess.run([
-                              "ffmpeg", "-y", "-i", wav_file,
-                              "-c:a", "libmp3lame", "-b:a", "192k",
-                              "-ar", "48000", "-ac", "2", output_mp3
-                          ], check=True)
-                          return
-
-                      last_error = RuntimeError(
-                          f"Gemini TTS HTTP {response.status_code}: {response.text[:1000]}"
-                      )
-                  except Exception as exc:
-                      last_error = exc
-
-                  if attempt < 3:
-                      print(f"Gemini {voice_name} batch attempt {attempt} failed. Retrying...")
-                      time.sleep(attempt * 3)
-
-              raise RuntimeError(
-                  f"Gemini TTS unavailable after 3 attempts for {voice_name}: {last_error}"
-              )
-
-          def split_on_silence(input_file, expected_parts, prefix):
-              detect = subprocess.run([
-                  "ffmpeg", "-hide_banner", "-i", input_file,
-                  "-af", "silencedetect=noise=-32dB:d=0.15",
-                  "-f", "null", "-"
-              ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
-
-              starts = [float(x) for x in re.findall(r"silence_start: ([0-9.]+)", detect.stderr)]
-              ends = [float(x) for x in re.findall(r"silence_end: ([0-9.]+)", detect.stderr)]
-
-              gaps = []
-              for s, e in zip(starts, ends):
-                  if e - s >= 0.15 and s > 0.05:
-                      gaps.append((s, e))
+              if not os.path.exists(output_mp3) or os.path.getsize(output_mp3) < 1000:
+                  raise RuntimeError("Tamil female TTS created no valid audio")
 
               duration = float(subprocess.check_output([
-                  "ffprobe", "-v", "error", "-show_entries", "format=duration",
-                  "-of", "default=noprint_wrappers=1:nokey=1", input_file
+                  "ffprobe", "-v", "error",
+                  "-show_entries", "format=duration",
+                  "-of", "default=noprint_wrappers=1:nokey=1",
+                  output_mp3
               ]).decode().strip())
 
-              # Pick the longest internal silences if Gemini produced extra natural pauses.
-              gaps = sorted(gaps, key=lambda g: g[1] - g[0], reverse=True)[:max(expected_parts - 1, 0)]
-              gaps = sorted(gaps)
+              if duration < 0.20:
+                  raise RuntimeError("Tamil female TTS audio is too short")
 
-              if len(gaps) != expected_parts - 1:
-                  raise RuntimeError(
-                      f"{prefix}: expected {expected_parts - 1} separator pauses, found {len(gaps)}. "
-                      "Gemini did not leave enough detectable pauses to split safely."
-                  )
-
-              boundaries = [0.0]
-              for s, e in gaps:
-                  boundaries.append((s + e) / 2.0)
-              boundaries.append(duration)
-
-              outputs = []
-              for idx in range(expected_parts):
-                  start = boundaries[idx]
-                  end = boundaries[idx + 1]
-                  out = f"segments/{prefix}_{idx + 1:02d}.mp3"
-                  if end - start < 0.20:
-                      raise RuntimeError(
-                          f"{prefix} part {idx + 1}: split duration too short ({end-start:.3f}s)"
-                      )
-
-                  # Use atrim + fresh MP3 encoding. Do NOT run silenceremove here:
-                  # it could erase an entire short segment and leave an invalid MP3.
-                  audio_filter = (
-                      f"atrim=start={start:.3f}:end={end:.3f},"
-                      "asetpts=PTS-STARTPTS,"
-                      "aresample=48000"
-                  )
-                  subprocess.run([
-                      "ffmpeg", "-y", "-i", input_file,
-                      "-vn", "-af", audio_filter,
-                      "-c:a", "libmp3lame", "-b:a", "192k", "-ar", "48000", "-ac", "2", out
-                  ], check=True)
-
-                  if not os.path.exists(out) or os.path.getsize(out) < 1000:
-                      raise RuntimeError(
-                          f"{prefix} part {idx + 1}: output audio is missing or empty"
-                      )
-
-                  try:
-                      part_duration = float(subprocess.check_output([
-                          "ffprobe", "-v", "error",
-                          "-show_entries", "format=duration",
-                          "-of", "default=noprint_wrappers=1:nokey=1", out
-                      ]).decode().strip())
-                  except Exception as exc:
-                      raise RuntimeError(
-                          f"{prefix} part {idx + 1}: generated MP3 failed validation: {exc}"
-                      )
-
-                  if part_duration < 0.20:
-                      raise RuntimeError(
-                          f"{prefix} part {idx + 1}: validated audio is too short ({part_duration:.3f}s)"
-                      )
-
-                  print(f"{prefix} part {idx + 1}: valid MP3, {part_duration:.2f}s")
-                  outputs.append(out)
-              return outputs
+              return spoken_text
 
           def build_fallback_timings(spoken_text, audio_duration):
               tokens = [t for t in re.split(r"\s+", spoken_text.strip()) if t]
@@ -302,24 +161,6 @@ jobs:
               with open(output_file, "w", encoding="utf-8-sig") as f:
                   f.write("\n".join(lines))
 
-          all_scenes = [(i, s) for i, s in enumerate(scenes, start=1)]
-
-          print("Generating ALL 8 scenes with female Gemini voice: ONE request")
-          gemini_voice_batch(
-              [s.get("voice_text", "") for _, s in all_scenes],
-              "segments/female_batch.mp3",
-              FEMALE_GEMINI_VOICE,
-              "natural, warm, energetic female"
-          )
-
-          female_parts = split_on_silence(
-              "segments/female_batch.mp3", len(all_scenes), "female_part"
-          )
-
-          voice_by_scene = {}
-          for (scene_no, _), path in zip(all_scenes, female_parts):
-              voice_by_scene[scene_no] = path
-
           for i, scene in enumerate(scenes, start=1):
               number = str(i).zfill(2)
               video_url = scene.get("video_url")
@@ -331,7 +172,7 @@ jobs:
                   raise RuntimeError(f"Scene {i}: voice_text missing")
 
               source_video = f"segments/source_{number}.mp4"
-              voice_file = voice_by_scene[i]
+              voice_file = f"segments/voice_{number}.mp3"
               subtitle_file = os.path.abspath(f"segments/subtitle_{number}.ass")
               output_file = f"segments/scene_{number}.mp4"
 
@@ -345,9 +186,9 @@ jobs:
                   "--retry-delay", "2", video_url, "-o", source_video
               ], check=True)
 
-              print(
-                  f"Voice: {FEMALE_GEMINI_VOICE} female"
-              )
+              print(f"Voice: {FEMALE_VOICE} female")
+              spoken_text = make_voice(voice_text, voice_file)
+              print("TTS text:", spoken_text)
 
               duration = float(subprocess.check_output([
                   "ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -391,7 +232,7 @@ jobs:
                   "-movflags", "+faststart", output_file
               ], check=True)
 
-          print("ALL 8 SCENES RENDERED WITH ONE GEMINI FEMALE TTS REQUEST + VALIDATED AUDIO SPLITS")
+          print("ALL 8 SCENES RENDERED WITH FREE TAMIL FEMALE TTS")
           PY
 
       - name: Join scenes with dynamic transitions
