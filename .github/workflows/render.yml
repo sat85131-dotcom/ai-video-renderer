@@ -1,17 +1,782 @@
 name: Render AI Video
 
 on:
-workflow_dispatch:
-inputs:
-scenes_json:
-description: "Scenes JSON"
-required: true
-type: string
+  workflow_dispatch:
+    inputs:
+      scenes_json:
+        description: "Scenes JSON"
+        required: true
+        type: string
 
 jobs:
-render:
-runs-on: ubuntu-latest
+  render:
+    runs-on: ubuntu-latest
 
-steps:
-  - name: Install tools
-    run: |
+    env:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
+    steps:
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fonts-noto-core fonts-noto-extra
+          python3 -m pip install --upgrade requests
+
+      - name: Save scenes JSON
+        env:
+          SCENES_JSON: ${{ inputs.scenes_json }}
+        run: |
+          printf '%s' "$SCENES_JSON" > scenes.json
+          python3 -m json.tool scenes.json
+
+      - name: Render scenes with 2-request Gemini Tamil voices
+        run: |
+          python3 <<'PY'
+          import base64
+          import json
+          import os
+          import re
+          import subprocess
+          import time
+          import wave
+          import requests
+
+          GEMINI_MODEL = "gemini-2.5-flash-preview-tts"
+          FEMALE_GEMINI_VOICE = "Despina"
+          MALE_GEMINI_VOICE = "Enceladus"
+          MARKER_GAP = 1.0
+
+          with open("scenes.json", "r", encoding="utf-8") as f:
+              scenes = json.load(f)
+
+          os.makedirs("segments", exist_ok=True)
+
+          def normalize_spoken_tamil(text):
+              text = str(text or "").strip()
+              text = text.replace("…", ".").replace("—", ",").replace("–", ",")
+              text = re.sub(r"\.{2,}", ".", text)
+              text = re.sub(r",\s*,+", ", ", text)
+              text = re.sub(r"\s*;\s*", ", ", text)
+              text = re.sub(r"\s*:\s*", ", ", text)
+              text = re.sub(r"\s+", " ", text)
+              return text.strip()
+
+          def write_pcm_wav(pcm_bytes, output_wav, sample_rate=24000):
+              with wave.open(output_wav, "wb") as wf:
+                  wf.setnchannels(1)
+                  wf.setsampwidth(2)
+                  wf.setframerate(sample_rate)
+                  wf.writeframes(pcm_bytes)
+
+          def gemini_voice_batch(texts, output_mp3, voice_name, voice_style):
+              api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+              if not api_key:
+                  raise RuntimeError("GEMINI_API_KEY secret is missing")
+
+              numbered = []
+              for n, text in enumerate(texts, start=1):
+                  numbered.append(f"PART {n}: {normalize_spoken_tamil(text)}")
+
+              script = "\n\n".join(numbered)
+              prompt = (
+                  "Create one continuous Tamil narration audio from the numbered PARTS below. "
+                  f"Use a {voice_style} Tamil YouTube storyteller voice. "
+                  "Speak ONLY the actual sentence after each PART label; do NOT speak the words PART or the numbers. "
+                  f"Insert exactly about {MARKER_GAP:.0f} second of clean silence between every part. "
+                  "Do not add music, sound effects, commentary, translations, or extra words. "
+                  "Use authentic native Tamil pronunciation, warm conversational delivery, "
+                  "friendly energy, relaxed pacing, and natural expression.\n\n" + script
+              )
+
+              url = (
+                  "https://generativelanguage.googleapis.com/v1beta/models/"
+                  f"{GEMINI_MODEL}:generateContent?key={api_key}"
+              )
+              payload = {
+                  "contents": [{"parts": [{"text": prompt}]}],
+                  "generationConfig": {
+                      "responseModalities": ["AUDIO"],
+                      "speechConfig": {
+                          "voiceConfig": {
+                              "prebuiltVoiceConfig": {"voiceName": voice_name}
+                          }
+                      }
+                  }
+              }
+
+              last_error = None
+              for attempt in range(1, 4):
+                  try:
+                      response = requests.post(url, json=payload, timeout=180)
+                      if response.status_code == 200:
+                          data = response.json()
+                          inline = data["candidates"][0]["content"]["parts"][0]["inlineData"]
+                          audio_bytes = base64.b64decode(inline["data"])
+                          mime = inline.get("mimeType", "").lower()
+                          wav_file = output_mp3.replace(".mp3", ".wav")
+
+                          if "wav" in mime:
+                              with open(wav_file, "wb") as f:
+                                  f.write(audio_bytes)
+                          elif "mpeg" in mime or "mp3" in mime:
+                              with open(output_mp3, "wb") as f:
+                                  f.write(audio_bytes)
+                              return
+                          else:
+                              write_pcm_wav(audio_bytes, wav_file, 24000)
+
+                          subprocess.run([
+                              "ffmpeg", "-y", "-i", wav_file,
+                              "-c:a", "libmp3lame", "-b:a", "192k",
+                              "-ar", "48000", "-ac", "2", output_mp3
+                          ], check=True)
+                          return
+
+                      last_error = RuntimeError(
+                          f"Gemini TTS HTTP {response.status_code}: {response.text[:1000]}"
+                      )
+                  except Exception as exc:
+                      last_error = exc
+
+                  if attempt < 3:
+                      print(f"Gemini {voice_name} batch attempt {attempt} failed. Retrying...")
+                      time.sleep(attempt * 3)
+
+              raise RuntimeError(
+                  f"Gemini TTS unavailable after 3 attempts for {voice_name}: {last_error}"
+              )
+
+          def split_on_silence(input_file, expected_parts, prefix):
+              detect = subprocess.run([
+                  "ffmpeg", "-hide_banner", "-i", input_file,
+                  "-af", "silencedetect=noise=-38dB:d=0.45",
+                  "-f", "null", "-"
+              ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+
+              starts = [float(x) for x in re.findall(r"silence_start: ([0-9.]+)", detect.stderr)]
+              ends = [float(x) for x in re.findall(r"silence_end: ([0-9.]+)", detect.stderr)]
+
+              gaps = []
+              for s, e in zip(starts, ends):
+                  if e - s >= 0.45 and s > 0.05:
+                      gaps.append((s, e))
+
+              duration = float(subprocess.check_output([
+                  "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                  "-of", "default=noprint_wrappers=1:nokey=1", input_file
+              ]).decode().strip())
+
+              # Pick the longest internal silences if Gemini produced extra natural pauses.
+              gaps = sorted(gaps, key=lambda g: g[1] - g[0], reverse=True)[:max(expected_parts - 1, 0)]
+              gaps = sorted(gaps)
+
+              if len(gaps) != expected_parts - 1:
+                  raise RuntimeError(
+                      f"{prefix}: expected {expected_parts - 1} separator silences, found {len(gaps)}. "
+                      "Refusing an unsafe split that could cut speech."
+                  )
+
+              boundaries = [0.0]
+              for s, e in gaps:
+                  boundaries.append((s + e) / 2.0)
+              boundaries.append(duration)
+
+              outputs = []
+              for idx in range(expected_parts):
+                  start = boundaries[idx]
+                  end = boundaries[idx + 1]
+                  out = f"segments/{prefix}_{idx + 1:02d}.mp3"
+                  subprocess.run([
+                      "ffmpeg", "-y", "-i", input_file,
+                      "-ss", f"{start:.3f}", "-to", f"{end:.3f}",
+                      "-af", "silenceremove=start_periods=1:start_duration=0.05:start_threshold=-45dB:"
+                             "stop_periods=1:stop_duration=0.10:stop_threshold=-45dB",
+                      "-c:a", "libmp3lame", "-b:a", "192k", "-ar", "48000", "-ac", "2", out
+                  ], check=True)
+                  outputs.append(out)
+              return outputs
+
+          def build_fallback_timings(spoken_text, audio_duration):
+              tokens = [t for t in re.split(r"\s+", spoken_text.strip()) if t]
+              if not tokens:
+                  return []
+              usable_duration = max(float(audio_duration) - 0.10, 0.20)
+              weights = []
+              for token in tokens:
+                  cleaned = re.sub(r"[^\w\u0B80-\u0BFF]", "", token, flags=re.UNICODE)
+                  weights.append(max(len(cleaned), 1))
+              total_weight = sum(weights)
+              cursor = 0.0
+              words = []
+              for index, (token, weight) in enumerate(zip(tokens, weights)):
+                  share = usable_duration * (weight / total_weight)
+                  start = cursor
+                  end = usable_duration if index == len(tokens) - 1 else min(
+                      usable_duration, cursor + max(share, 0.08)
+                  )
+                  if end <= start:
+                      end = min(usable_duration, start + 0.08)
+                  words.append({"text": token.strip(), "start": start, "end": end})
+                  cursor = end
+              return words
+
+          def ass_time(seconds):
+              hours = int(seconds // 3600)
+              minutes = int((seconds % 3600) // 60)
+              secs = seconds % 60
+              return f"{hours}:{minutes:02d}:{secs:05.2f}"
+
+          def escape_ass(text):
+              return (
+                  str(text).replace("\\", r"\\").replace("{", r"\{")
+                  .replace("}", r"\}").replace("\n", " ").strip()
+              )
+
+          def create_ass(words, output_file):
+              lines = [
+                  "[Script Info]", "ScriptType: v4.00+", "PlayResX: 1080",
+                  "PlayResY: 1920", "WrapStyle: 2", "ScaledBorderAndShadow: yes", "",
+                  "[V4+ Styles]",
+                  "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding",
+                  "Style: Default,Noto Sans Tamil,66,&H00FFFFFF,&H00FFFFFF,&H00000000,&H70000000,-1,0,0,0,100,100,0,0,1,5,1,2,65,65,305,1",
+                  "", "[Events]",
+                  "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text",
+              ]
+              chunk_size = 2
+              for index, word in enumerate(words):
+                  group_start = (index // chunk_size) * chunk_size
+                  group_end = min(group_start + chunk_size, len(words))
+                  group = words[group_start:group_end]
+                  display_words = []
+                  for local_index, item in enumerate(group):
+                      actual_index = group_start + local_index
+                      safe_word = escape_ass(item["text"])
+                      if actual_index == index:
+                          display_words.append(
+                              r"{\1c&H0000FF00&\b1}" + safe_word + r"{\1c&H00FFFFFF&\b1}"
+                          )
+                      else:
+                          display_words.append(r"{\1c&H00FFFFFF&\b1}" + safe_word)
+                  caption = " ".join(display_words)
+                  start = float(word["start"])
+                  if index + 1 < len(words):
+                      end = max(float(words[index + 1]["start"]), start + 0.08)
+                  else:
+                      end = max(float(word["end"]) + 0.08, start + 0.10)
+                  lines.append(
+                      f"Dialogue: 0,{ass_time(start)},{ass_time(end)},"
+                      f"Default,,0,0,0,,{{\\an2}}{caption}"
+                  )
+              with open(output_file, "w", encoding="utf-8-sig") as f:
+                  f.write("\n".join(lines))
+
+          odd_scenes = [(i, s) for i, s in enumerate(scenes, start=1) if i % 2 == 1]
+          even_scenes = [(i, s) for i, s in enumerate(scenes, start=1) if i % 2 == 0]
+
+          print("Generating female batch: ONE Gemini request")
+          gemini_voice_batch(
+              [s.get("voice_text", "") for _, s in odd_scenes],
+              "segments/female_batch.mp3",
+              FEMALE_GEMINI_VOICE,
+              "natural, warm, energetic female"
+          )
+          female_parts = split_on_silence(
+              "segments/female_batch.mp3", len(odd_scenes), "female_part"
+          )
+
+          print("Generating male batch: ONE Gemini request")
+          gemini_voice_batch(
+              [s.get("voice_text", "") for _, s in even_scenes],
+              "segments/male_batch.mp3",
+              MALE_GEMINI_VOICE,
+              "natural, warm, energetic male"
+          )
+          male_parts = split_on_silence(
+              "segments/male_batch.mp3", len(even_scenes), "male_part"
+          )
+
+          voice_by_scene = {}
+          for (scene_no, _), path in zip(odd_scenes, female_parts):
+              voice_by_scene[scene_no] = path
+          for (scene_no, _), path in zip(even_scenes, male_parts):
+              voice_by_scene[scene_no] = path
+
+          for i, scene in enumerate(scenes, start=1):
+              number = str(i).zfill(2)
+              video_url = scene.get("video_url")
+              voice_text = normalize_spoken_tamil(scene.get("voice_text", ""))
+
+              if not video_url:
+                  raise RuntimeError(f"Scene {i}: video_url missing")
+              if not voice_text:
+                  raise RuntimeError(f"Scene {i}: voice_text missing")
+
+              source_video = f"segments/source_{number}.mp4"
+              voice_file = voice_by_scene[i]
+              subtitle_file = os.path.abspath(f"segments/subtitle_{number}.ass")
+              output_file = f"segments/scene_{number}.mp4"
+
+              print("==========================")
+              print(f"SCENE {i}")
+              print("==========================")
+              print("Downloading clip...")
+
+              subprocess.run([
+                  "curl", "-L", "--fail", "--retry", "3",
+                  "--retry-delay", "2", video_url, "-o", source_video
+              ], check=True)
+
+              print(
+                  f"Voice: {FEMALE_GEMINI_VOICE if i % 2 == 1 else MALE_GEMINI_VOICE}"
+              )
+
+              duration = float(subprocess.check_output([
+                  "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                  "-of", "default=noprint_wrappers=1:nokey=1", voice_file
+              ]).decode().strip())
+
+              words = build_fallback_timings(voice_text, duration)
+              if not words:
+                  raise RuntimeError(f"Scene {i}: could not build Tamil caption timings")
+              create_ass(words, subtitle_file)
+
+              scene_duration = duration + 0.12
+              print(f"Voice duration: {duration:.2f}s")
+
+              subtitle_filter = f"subtitles='{subtitle_file}':fontsdir='/usr/share/fonts'"
+              zoom_filter = (
+                  "zoompan="
+                  "z='min(zoom+0.0007,1.05)':"
+                  "x='iw/2-(iw/zoom/2)':"
+                  "y='ih/2-(ih/zoom/2)':"
+                  "d=1:s=1080x1920:fps=30,"
+              )
+              video_filter = (
+                  "scale=1080:1920:force_original_aspect_ratio=increase,"
+                  "crop=1080:1920," + zoom_filter +
+                  "eq=contrast=1.06:saturation=1.10:brightness=0.01,"
+                  + subtitle_filter + ",format=yuv420p"
+              )
+
+              print("Rendering scene...")
+              subprocess.run([
+                  "ffmpeg", "-y",
+                  "-stream_loop", "-1", "-i", source_video,
+                  "-i", voice_file,
+                  "-t", str(scene_duration),
+                  "-vf", video_filter,
+                  "-map", "0:v:0", "-map", "1:a:0",
+                  "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+                  "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+                  "-af", "apad=pad_dur=0.12",
+                  "-movflags", "+faststart", output_file
+              ], check=True)
+
+          print("ALL 8 SCENES RENDERED WITH ONLY 2 GEMINI TTS REQUESTS")
+          PY
+
+      - name: Join scenes with dynamic transitions
+        run: |
+          python3 <<'PY'
+          import glob
+          import subprocess
+          import shutil
+
+          scenes = sorted(
+              glob.glob("segments/scene_*.mp4")
+          )
+
+          if not scenes:
+              raise RuntimeError(
+                  "No rendered scene files found"
+              )
+
+          if len(scenes) == 1:
+              shutil.copyfile(
+                  scenes[0],
+                  "final.mp4"
+              )
+              raise SystemExit(0)
+
+          durations = []
+
+          for scene in scenes:
+              duration = subprocess.check_output([
+                  "ffprobe",
+                  "-v", "error",
+                  "-show_entries",
+                  "format=duration",
+                  "-of",
+                  "default=noprint_wrappers=1:nokey=1",
+                  scene
+              ]).decode().strip()
+
+              durations.append(
+                  float(duration)
+              )
+
+          transition_duration = min(
+              0.18,
+              min(durations) / 3
+          )
+
+          print("Scene durations:")
+
+          for i, duration in enumerate(
+              durations,
+              start=1
+          ):
+              print(
+                  f"Scene {i}: {duration:.2f}s"
+              )
+
+          print(
+              "Transition duration:",
+              transition_duration
+          )
+
+          command = [
+              "ffmpeg",
+              "-y"
+          ]
+
+          for scene in scenes:
+              command.extend([
+                  "-i",
+                  scene
+              ])
+
+          filters = []
+
+          for i in range(len(scenes)):
+              filters.append(
+                  f"[{i}:v]"
+                  f"settb=AVTB,"
+                  f"setpts=PTS-STARTPTS"
+                  f"[v{i}]"
+              )
+
+              filters.append(
+                  f"[{i}:a]"
+                  f"asetpts=PTS-STARTPTS"
+                  f"[a{i}]"
+              )
+
+          running_duration = durations[0]
+
+          video_left = "v0"
+          audio_left = "a0"
+
+          for i in range(1, len(scenes)):
+              video_output = f"vx{i}"
+              audio_output = f"ax{i}"
+
+              offset = (
+                  running_duration -
+                  transition_duration
+              )
+
+              filters.append(
+                  f"[{video_left}]"
+                  f"[v{i}]"
+                  f"xfade="
+                  f"transition=fade:"
+                  f"duration={transition_duration:.3f}:"
+                  f"offset={offset:.3f}"
+                  f"[{video_output}]"
+              )
+
+              filters.append(
+                  f"[{audio_left}]"
+                  f"[a{i}]"
+                  f"acrossfade="
+                  f"d={transition_duration:.3f}:"
+                  f"c1=tri:"
+                  f"c2=tri"
+                  f"[{audio_output}]"
+              )
+
+              running_duration = (
+                  running_duration +
+                  durations[i] -
+                  transition_duration
+              )
+
+              video_left = video_output
+              audio_left = audio_output
+
+          filter_complex = ";".join(
+              filters
+          )
+
+          command.extend([
+              "-filter_complex",
+              filter_complex,
+
+              "-map",
+              f"[{video_left}]",
+
+              "-map",
+              f"[{audio_left}]",
+
+              "-c:v",
+              "libx264",
+
+              "-preset",
+              "veryfast",
+
+              "-crf",
+              "22",
+
+              "-c:a",
+              "aac",
+
+              "-b:a",
+              "192k",
+
+              "-ar",
+              "48000",
+
+              "-ac",
+              "2",
+
+              "-movflags",
+              "+faststart",
+
+              "final.mp4"
+          ])
+
+          print(
+              "Rendering final video with dynamic transitions..."
+          )
+
+          subprocess.run(
+              command,
+              check=True
+          )
+
+          print(
+              "FINAL TRANSITION VIDEO READY"
+          )
+          PY
+
+      - name: Add background music with voice ducking
+        run: |
+          python3 <<'PY'
+          import subprocess
+          import urllib.request
+          import os
+
+          MUSIC_URL = "https://cdn.pixabay.com/download/audio/2022/03/15/audio_115b9b04e5.mp3"
+
+          print("Downloading background music...")
+
+          try:
+              urllib.request.urlretrieve(
+                  MUSIC_URL,
+                  "background.mp3"
+              )
+
+          except Exception as e:
+              print(
+                  "Music download failed:",
+                  e
+              )
+
+              print(
+                  "Keeping video without background music."
+              )
+
+              raise SystemExit(0)
+
+          duration = subprocess.check_output([
+              "ffprobe",
+              "-v", "error",
+              "-show_entries",
+              "format=duration",
+              "-of",
+              "default=noprint_wrappers=1:nokey=1",
+              "final.mp4"
+          ]).decode().strip()
+
+          duration = float(duration)
+
+          print(
+              f"Final video duration: {duration:.2f}s"
+          )
+
+          filter_complex = (
+              "[1:a]"
+              "volume=0.06,"
+              f"atrim=0:{duration},"
+              "asetpts=PTS-STARTPTS"
+              "[music];"
+
+              "[0:a]"
+              "asplit=2"
+              "[voice][sidechain];"
+
+              "[music]"
+              "[sidechain]"
+              "sidechaincompress="
+              "threshold=0.02:"
+              "ratio=8:"
+              "attack=20:"
+              "release=350"
+              "[ducked];"
+
+              "[voice]"
+              "[ducked]"
+              "amix="
+              "inputs=2:"
+              "duration=first:"
+              "dropout_transition=2,"
+              "alimiter=limit=0.95"
+              "[mixed]"
+          )
+
+          subprocess.run([
+              "ffmpeg",
+              "-y",
+
+              "-i",
+              "final.mp4",
+
+              "-stream_loop",
+              "-1",
+
+              "-i",
+              "background.mp3",
+
+              "-filter_complex",
+              filter_complex,
+
+              "-map",
+              "0:v:0",
+
+              "-map",
+              "[mixed]",
+
+              "-c:v",
+              "copy",
+
+              "-c:a",
+              "aac",
+
+              "-b:a",
+              "192k",
+
+              "-ar",
+              "48000",
+
+              "-ac",
+              "2",
+
+              "-shortest",
+
+              "-movflags",
+              "+faststart",
+
+              "final_music.mp4"
+
+          ], check=True)
+
+          os.replace(
+              "final_music.mp4",
+              "final.mp4"
+          )
+
+          print(
+              "BACKGROUND MUSIC + VOICE DUCKING READY"
+          )
+          PY
+
+      - name: Add hook impact SFX
+        run: |
+          echo "Creating hook impact SFX..."
+
+          ffmpeg -y \
+            -f lavfi \
+            -i "anoisesrc=color=white:duration=0.45:amplitude=0.15" \
+            -af "highpass=f=180,lowpass=f=2200,afade=t=out:st=0.08:d=0.37,volume=0.35" \
+            -ar 48000 \
+            -ac 2 \
+            whoosh.wav
+
+          ffmpeg -y \
+            -f lavfi \
+            -i "sine=frequency=75:duration=0.35:sample_rate=48000" \
+            -af "afade=t=out:st=0:d=0.35,volume=0.55" \
+            -ar 48000 \
+            -ac 2 \
+            thump.wav
+
+          ffmpeg -y \
+            -i whoosh.wav \
+            -i thump.wav \
+            -filter_complex "[0:a][1:a]amix=inputs=2:duration=longest:normalize=0,alimiter=limit=0.90[sfx]" \
+            -map "[sfx]" \
+            -ar 48000 \
+            -ac 2 \
+            hook_sfx.wav
+
+          ffmpeg -y \
+            -i final.mp4 \
+            -i hook_sfx.wav \
+            -filter_complex "[1:a]volume=0.35[sfx];[0:a][sfx]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95[aout]" \
+            -map 0:v:0 \
+            -map "[aout]" \
+            -c:v copy \
+            -c:a aac \
+            -b:a 192k \
+            -ar 48000 \
+            -ac 2 \
+            -movflags +faststart \
+            final_sfx.mp4
+
+          mv final_sfx.mp4 final.mp4
+
+          echo "HOOK IMPACT SFX READY"
+
+      - name: Fix final video compatibility
+        run: |
+          echo "Fixing MP4 for mobile, browser and YouTube playback..."
+
+          ffmpeg -y \
+            -fflags +genpts \
+            -i final.mp4 \
+            -map 0:v:0 \
+            -map 0:a:0 \
+            -c:v libx264 \
+            -preset veryfast \
+            -crf 22 \
+            -pix_fmt yuv420p \
+            -profile:v high \
+            -level 4.1 \
+            -r 30 \
+            -c:a aac \
+            -b:a 192k \
+            -ar 48000 \
+            -ac 2 \
+            -movflags +faststart \
+            final_fixed.mp4
+
+          mv final_fixed.mp4 final.mp4
+
+          echo "PLAYBACK COMPATIBILITY FIXED"
+
+      - name: Check final video
+        run: |
+          echo "===== FINAL VIDEO ====="
+
+          ffprobe \
+            -v error \
+            -show_entries format=duration \
+            -show_entries stream=codec_name,width,height \
+            final.mp4
+
+      - name: Upload final video
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-video
+          path: final.mp4
