@@ -36,7 +36,12 @@ jobs:
           import time
           import edge_tts
 
-          FEMALE_VOICE = "en-US-AriaNeural"
+          # Try these English female voices in order.
+          FEMALE_VOICES = [
+              "en-US-AriaNeural",
+              "en-US-JennyNeural",
+              "en-US-AvaNeural"
+          ]
 
           with open("scenes.json", "r", encoding="utf-8") as f:
               scenes = json.load(f)
@@ -53,79 +58,109 @@ jobs:
               text = re.sub(r"\s+", " ", text)
               return text.strip()
 
+          def get_audio_duration(path):
+              return float(
+                  subprocess.check_output([
+                      "ffprobe",
+                      "-v", "error",
+                      "-show_entries", "format=duration",
+                      "-of", "default=noprint_wrappers=1:nokey=1",
+                      path
+                  ]).decode().strip()
+              )
+
           def make_voice(text, output_mp3):
               spoken_text = normalize_spoken_english(text)
 
               if not spoken_text:
                   raise RuntimeError("English voice text is empty")
 
-              print(f"Generating English female voice with {FEMALE_VOICE}")
-
-              # Retry Edge TTS up to 3 times if no audio is returned.
               last_error = None
 
-              for attempt in range(1, 4):
-                  try:
-                      if os.path.exists(output_mp3):
-                          os.remove(output_mp3)
+              for voice in FEMALE_VOICES:
+                  print("==============================")
+                  print(f"Trying TTS voice: {voice}")
+                  print("==============================")
 
-                      print(f"TTS attempt {attempt}/3")
+                  for attempt in range(1, 4):
+                      try:
+                          if os.path.exists(output_mp3):
+                              os.remove(output_mp3)
 
-                      communicate = edge_tts.Communicate(
-                          spoken_text,
-                          voice=FEMALE_VOICE,
-                          rate="-5%",
-                          pitch="-2Hz",
-                          volume="+0%"
-                      )
-
-                      communicate.save_sync(output_mp3)
-
-                      if (
-                          not os.path.exists(output_mp3)
-                          or os.path.getsize(output_mp3) < 1000
-                      ):
-                          raise RuntimeError(
-                              "Edge TTS returned an empty or invalid audio file"
+                          print(
+                              f"Voice {voice} - attempt {attempt}/3"
                           )
 
-                      duration = float(
-                          subprocess.check_output([
-                              "ffprobe",
-                              "-v", "error",
-                              "-show_entries", "format=duration",
-                              "-of", "default=noprint_wrappers=1:nokey=1",
-                              output_mp3
-                          ]).decode().strip()
-                      )
-
-                      if duration < 0.20:
-                          raise RuntimeError(
-                              "English female TTS audio is too short"
+                          communicate = edge_tts.Communicate(
+                              spoken_text,
+                              voice=voice,
+                              rate="-5%",
+                              pitch="-2Hz",
+                              volume="+0%"
                           )
 
-                      print(
-                          f"TTS successful on attempt {attempt}. "
-                          f"Duration: {duration:.2f}s"
-                      )
+                          communicate.save_sync(output_mp3)
 
-                      return spoken_text
+                          if not os.path.exists(output_mp3):
+                              raise RuntimeError(
+                                  "TTS did not create an audio file"
+                              )
 
-                  except Exception as e:
-                      last_error = e
-                      print(f"TTS attempt {attempt}/3 failed: {e}")
+                          if os.path.getsize(output_mp3) < 1000:
+                              raise RuntimeError(
+                                  "TTS created an invalid audio file"
+                              )
 
-                      if attempt < 3:
-                          print("Waiting 5 seconds before retry...")
-                          time.sleep(5)
+                          duration = get_audio_duration(output_mp3)
+
+                          if duration < 0.20:
+                              raise RuntimeError(
+                                  "TTS audio is too short"
+                              )
+
+                          print(
+                              f"TTS SUCCESS: {voice}"
+                          )
+
+                          print(
+                              f"Audio duration: {duration:.2f}s"
+                          )
+
+                          return spoken_text, voice
+
+                      except Exception as e:
+                          last_error = e
+
+                          print(
+                              f"{voice} attempt {attempt}/3 failed:"
+                          )
+
+                          print(e)
+
+                          if attempt < 3:
+                              print(
+                                  "Waiting 5 seconds before retry..."
+                              )
+                              time.sleep(5)
+
+                  print(
+                      f"{voice} failed. Trying next voice..."
+                  )
+
+                  time.sleep(3)
 
               raise RuntimeError(
-                  f"Edge TTS failed after 3 attempts: {last_error}"
+                  "All Edge TTS female voices failed. "
+                  f"Last error: {last_error}"
               )
 
           def build_fallback_timings(spoken_text, audio_duration):
               tokens = [
-                  t for t in re.split(r"\s+", spoken_text.strip()) if t
+                  t for t in re.split(
+                      r"\s+",
+                      spoken_text.strip()
+                  )
+                  if t
               ]
 
               if not tokens:
@@ -139,19 +174,33 @@ jobs:
               weights = []
 
               for token in tokens:
-                  cleaned = re.sub(r"[^\w]", "", token)
-                  weights.append(max(len(cleaned), 1))
+                  cleaned = re.sub(
+                      r"[^\w]",
+                      "",
+                      token
+                  )
+
+                  weights.append(
+                      max(len(cleaned), 1)
+                  )
 
               total_weight = sum(weights)
               cursor = 0.0
               words = []
 
-              for index, (token, weight) in enumerate(zip(tokens, weights)):
-                  share = usable_duration * (weight / total_weight)
+              for index, (token, weight) in enumerate(
+                  zip(tokens, weights)
+              ):
+                  share = (
+                      usable_duration
+                      * (weight / total_weight)
+                  )
+
                   start = cursor
 
                   if index == len(tokens) - 1:
                       end = usable_duration
+
                   else:
                       end = min(
                           usable_duration,
@@ -179,7 +228,11 @@ jobs:
               minutes = int((seconds % 3600) // 60)
               secs = seconds % 60
 
-              return f"{hours}:{minutes:02d}:{secs:05.2f}"
+              return (
+                  f"{hours}:"
+                  f"{minutes:02d}:"
+                  f"{secs:05.2f}"
+              )
 
           def escape_ass(text):
               return (
@@ -211,18 +264,29 @@ jobs:
               chunk_size = 2
 
               for index, word in enumerate(words):
-                  group_start = (index // chunk_size) * chunk_size
+                  group_start = (
+                      index // chunk_size
+                  ) * chunk_size
+
                   group_end = min(
                       group_start + chunk_size,
                       len(words)
                   )
 
-                  group = words[group_start:group_end]
+                  group = words[
+                      group_start:group_end
+                  ]
+
                   display_words = []
 
                   for local_index, item in enumerate(group):
-                      actual_index = group_start + local_index
-                      safe_word = escape_ass(item["text"])
+                      actual_index = (
+                          group_start + local_index
+                      )
+
+                      safe_word = escape_ass(
+                          item["text"]
+                      )
 
                       if actual_index == index:
                           display_words.append(
@@ -230,20 +294,29 @@ jobs:
                               + safe_word
                               + r"{\1c&H00FFFFFF&\b1}"
                           )
+
                       else:
                           display_words.append(
                               r"{\1c&H00FFFFFF&\b1}"
                               + safe_word
                           )
 
-                  caption = " ".join(display_words)
-                  start = float(word["start"])
+                  caption = " ".join(
+                      display_words
+                  )
+
+                  start = float(
+                      word["start"]
+                  )
 
                   if index + 1 < len(words):
                       end = max(
-                          float(words[index + 1]["start"]),
+                          float(
+                              words[index + 1]["start"]
+                          ),
                           start + 0.08
                       )
+
                   else:
                       end = max(
                           float(word["end"]) + 0.08,
@@ -251,8 +324,11 @@ jobs:
                       )
 
                   lines.append(
-                      f"Dialogue: 0,{ass_time(start)},{ass_time(end)},"
-                      f"Default,,0,0,0,,{{\\an2}}{caption}"
+                      f"Dialogue: 0,"
+                      f"{ass_time(start)},"
+                      f"{ass_time(end)},"
+                      f"Default,,0,0,0,,"
+                      f"{{\\an2}}{caption}"
                   )
 
               with open(
@@ -260,15 +336,25 @@ jobs:
                   "w",
                   encoding="utf-8-sig"
               ) as f:
-                  f.write("\n".join(lines))
+                  f.write(
+                      "\n".join(lines)
+                  )
 
-          for i, scene in enumerate(scenes, start=1):
+          for i, scene in enumerate(
+              scenes,
+              start=1
+          ):
               number = str(i).zfill(2)
 
-              video_url = scene.get("video_url")
+              video_url = scene.get(
+                  "video_url"
+              )
 
               voice_text = normalize_spoken_english(
-                  scene.get("voice_text", "")
+                  scene.get(
+                      "voice_text",
+                      ""
+                  )
               )
 
               if not video_url:
@@ -281,14 +367,21 @@ jobs:
                       f"Scene {i}: voice_text missing"
                   )
 
-              source_video = f"segments/source_{number}.mp4"
-              voice_file = f"segments/voice_{number}.mp3"
+              source_video = (
+                  f"segments/source_{number}.mp4"
+              )
+
+              voice_file = (
+                  f"segments/voice_{number}.mp3"
+              )
 
               subtitle_file = os.path.abspath(
                   f"segments/subtitle_{number}.ass"
               )
 
-              output_file = f"segments/scene_{number}.mp4"
+              output_file = (
+                  f"segments/scene_{number}.mp4"
+              )
 
               print("==========================")
               print(f"SCENE {i}")
@@ -306,24 +399,22 @@ jobs:
                   source_video
               ], check=True)
 
-              print(f"Voice: {FEMALE_VOICE} female")
-
-              spoken_text = make_voice(
+              spoken_text, used_voice = make_voice(
                   voice_text,
                   voice_file
               )
 
-              print("TTS text:", spoken_text)
+              print(
+                  f"Scene {i} voice: {used_voice}"
+              )
 
-              duration = float(
-                  subprocess.check_output([
-                      "ffprobe",
-                      "-v", "error",
-                      "-show_entries", "format=duration",
-                      "-of",
-                      "default=noprint_wrappers=1:nokey=1",
-                      voice_file
-                  ]).decode().strip()
+              print(
+                  "TTS text:",
+                  spoken_text
+              )
+
+              duration = get_audio_duration(
+                  voice_file
               )
 
               words = build_fallback_timings(
@@ -333,7 +424,8 @@ jobs:
 
               if not words:
                   raise RuntimeError(
-                      f"Scene {i}: could not build English caption timings"
+                      f"Scene {i}: could not build "
+                      "English caption timings"
                   )
 
               create_ass(
@@ -341,10 +433,13 @@ jobs:
                   subtitle_file
               )
 
-              scene_duration = duration + 0.12
+              scene_duration = (
+                  duration + 0.12
+              )
 
               print(
-                  f"Voice duration: {duration:.2f}s"
+                  f"Voice duration: "
+                  f"{duration:.2f}s"
               )
 
               subtitle_filter = (
@@ -357,7 +452,9 @@ jobs:
                   "z='min(zoom+0.0007,1.05)':"
                   "x='iw/2-(iw/zoom/2)':"
                   "y='ih/2-(ih/zoom/2)':"
-                  "d=1:s=1080x1920:fps=30,"
+                  "d=1:"
+                  "s=1080x1920:"
+                  "fps=30,"
               )
 
               video_filter = (
@@ -372,7 +469,9 @@ jobs:
                   + ",format=yuv420p"
               )
 
-              print("Rendering scene...")
+              print(
+                  "Rendering scene..."
+              )
 
               subprocess.run([
                   "ffmpeg",
@@ -397,7 +496,8 @@ jobs:
               ], check=True)
 
           print(
-              "ALL SCENES RENDERED WITH FREE ENGLISH FEMALE TTS"
+              "ALL SCENES RENDERED WITH "
+              "FREE ENGLISH FEMALE TTS"
           )
           PY
 
@@ -409,7 +509,9 @@ jobs:
           import shutil
 
           scenes = sorted(
-              glob.glob("segments/scene_*.mp4")
+              glob.glob(
+                  "segments/scene_*.mp4"
+              )
           )
 
           if not scenes:
@@ -422,6 +524,7 @@ jobs:
                   scenes[0],
                   "final.mp4"
               )
+
               raise SystemExit(0)
 
           durations = []
@@ -437,21 +540,26 @@ jobs:
                   scene
               ]).decode().strip()
 
-              durations.append(float(duration))
+              durations.append(
+                  float(duration)
+              )
 
           transition_duration = min(
               0.18,
               min(durations) / 3
           )
 
-          print("Scene durations:")
+          print(
+              "Scene durations:"
+          )
 
           for i, duration in enumerate(
               durations,
               start=1
           ):
               print(
-                  f"Scene {i}: {duration:.2f}s"
+                  f"Scene {i}: "
+                  f"{duration:.2f}s"
               )
 
           print(
@@ -472,7 +580,9 @@ jobs:
 
           filters = []
 
-          for i in range(len(scenes)):
+          for i in range(
+              len(scenes)
+          ):
               filters.append(
                   f"[{i}:v]"
                   f"settb=AVTB,"
@@ -486,14 +596,24 @@ jobs:
                   f"[a{i}]"
               )
 
-          running_duration = durations[0]
+          running_duration = (
+              durations[0]
+          )
 
           video_left = "v0"
           audio_left = "a0"
 
-          for i in range(1, len(scenes)):
-              video_output = f"vx{i}"
-              audio_output = f"ax{i}"
+          for i in range(
+              1,
+              len(scenes)
+          ):
+              video_output = (
+                  f"vx{i}"
+              )
+
+              audio_output = (
+                  f"ax{i}"
+              )
 
               offset = (
                   running_duration
@@ -505,7 +625,8 @@ jobs:
                   f"[v{i}]"
                   f"xfade="
                   f"transition=fade:"
-                  f"duration={transition_duration:.3f}:"
+                  f"duration="
+                  f"{transition_duration:.3f}:"
                   f"offset={offset:.3f}"
                   f"[{video_output}]"
               )
@@ -514,7 +635,8 @@ jobs:
                   f"[{audio_left}]"
                   f"[a{i}]"
                   f"acrossfade="
-                  f"d={transition_duration:.3f}:"
+                  f"d="
+                  f"{transition_duration:.3f}:"
                   f"c1=tri:"
                   f"c2=tri"
                   f"[{audio_output}]"
@@ -526,10 +648,17 @@ jobs:
                   - transition_duration
               )
 
-              video_left = video_output
-              audio_left = audio_output
+              video_left = (
+                  video_output
+              )
 
-          filter_complex = ";".join(filters)
+              audio_left = (
+                  audio_output
+              )
+
+          filter_complex = (
+              ";".join(filters)
+          )
 
           command.extend([
               "-filter_complex",
@@ -569,7 +698,8 @@ jobs:
           ])
 
           print(
-              "Rendering final video with dynamic transitions..."
+              "Rendering final video "
+              "with dynamic transitions..."
           )
 
           subprocess.run(
@@ -591,7 +721,9 @@ jobs:
 
           MUSIC_URL = "https://cdn.pixabay.com/download/audio/2022/03/15/audio_115b9b04e5.mp3"
 
-          print("Downloading background music...")
+          print(
+              "Downloading background music..."
+          )
 
           try:
               urllib.request.urlretrieve(
@@ -606,7 +738,8 @@ jobs:
               )
 
               print(
-                  "Keeping video without background music."
+                  "Keeping video without "
+                  "background music."
               )
 
               raise SystemExit(0)
@@ -621,10 +754,13 @@ jobs:
               "final.mp4"
           ]).decode().strip()
 
-          duration = float(duration)
+          duration = float(
+              duration
+          )
 
           print(
-              f"Final video duration: {duration:.2f}s"
+              f"Final video duration: "
+              f"{duration:.2f}s"
           )
 
           filter_complex = (
@@ -709,7 +845,8 @@ jobs:
           )
 
           print(
-              "BACKGROUND MUSIC + VOICE DUCKING READY"
+              "BACKGROUND MUSIC + "
+              "VOICE DUCKING READY"
           )
           PY
 
