@@ -68,84 +68,302 @@ jobs:
                   wf.setframerate(sample_rate)
                   wf.writeframes(pcm_bytes)
 
-          def gemini_voice_batch(texts, output_mp3, voice_name, voice_style):
-              api_key = os.environ.get("GEMINI_API_KEY", "").strip()
-              if not api_key:
-                  raise RuntimeError("GEMINI_API_KEY secret is missing")
+def gemini_voice_batch(texts, output_mp3, voice_name, voice_style):
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
 
-              numbered = []
-              for n, text in enumerate(texts, start=1):
-                  numbered.append(f"PART {n}: {normalize_spoken_tamil(text)}")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY secret is missing")
 
-              script = "\n\n".join(numbered)
-              prompt = (
-                  "Create one continuous Tamil narration audio from the numbered PARTS below. "
-                  f"Use a {voice_style} Tamil YouTube storyteller voice. "
-                  "Speak ONLY the actual sentence after each PART label; do NOT speak the words PART or the numbers. "
-                  f"Insert exactly about {MARKER_GAP:.0f} second of clean silence between every part. "
-                  "Do not add music, sound effects, commentary, translations, or extra words. "
-                  "Use authentic native Tamil pronunciation, warm conversational delivery, "
-                  "friendly energy, relaxed pacing, and natural expression.\n\n" + script
-              )
+    numbered = []
 
-              url = (
-                  "https://generativelanguage.googleapis.com/v1beta/models/"
-                  f"{GEMINI_MODEL}:generateContent?key={api_key}"
-              )
-              payload = {
-                  "contents": [{"parts": [{"text": prompt}]}],
-                  "generationConfig": {
-                      "responseModalities": ["AUDIO"],
-                      "speechConfig": {
-                          "voiceConfig": {
-                              "prebuiltVoiceConfig": {"voiceName": voice_name}
-                          }
-                      }
-                  }
-              }
+    for n, text in enumerate(texts, start=1):
+        clean_text = normalize_spoken_tamil(text)
 
-              last_error = None
-              for attempt in range(1, 4):
-                  try:
-                      response = requests.post(url, json=payload, timeout=180)
-                      if response.status_code == 200:
-                          data = response.json()
-                          inline = data["candidates"][0]["content"]["parts"][0]["inlineData"]
-                          audio_bytes = base64.b64decode(inline["data"])
-                          mime = inline.get("mimeType", "").lower()
-                          wav_file = output_mp3.replace(".mp3", ".wav")
+        if not clean_text:
+            raise RuntimeError(f"Empty Tamil text in PART {n}")
 
-                          if "wav" in mime:
-                              with open(wav_file, "wb") as f:
-                                  f.write(audio_bytes)
-                          elif "mpeg" in mime or "mp3" in mime:
-                              with open(output_mp3, "wb") as f:
-                                  f.write(audio_bytes)
-                              return
-                          else:
-                              write_pcm_wav(audio_bytes, wav_file, 24000)
+        numbered.append(
+            f"PART {n}: {clean_text}"
+        )
 
-                          subprocess.run([
-                              "ffmpeg", "-y", "-i", wav_file,
-                              "-c:a", "libmp3lame", "-b:a", "192k",
-                              "-ar", "48000", "-ac", "2", output_mp3
-                          ], check=True)
-                          return
+    script = "\n\n".join(numbered)
 
-                      last_error = RuntimeError(
-                          f"Gemini TTS HTTP {response.status_code}: {response.text[:1000]}"
-                      )
-                  except Exception as exc:
-                      last_error = exc
+    prompt = (
+        "Create one continuous Tamil narration audio from the numbered PARTS below. "
+        f"Use a {voice_style} Tamil YouTube storyteller voice. "
+        "Speak ONLY the actual Tamil sentence after each PART label. "
+        "Do NOT speak the words PART or the numbers. "
+        f"Insert approximately {MARKER_GAP:.0f} second of clean silence between every part. "
+        "Do not add music, sound effects, commentary, translations, or extra words. "
+        "Use authentic natural spoken Tamil pronunciation. "
+        "Keep the delivery warm, emotional, conversational and realistic, "
+        "like a family conversation in a Tamil short film. "
+        "Do not exaggerate the emotion.\n\n"
+        + script
+    )
 
-                  if attempt < 3:
-                      print(f"Gemini {voice_name} batch attempt {attempt} failed. Retrying...")
-                      time.sleep(attempt * 3)
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{GEMINI_MODEL}:generateContent?key={api_key}"
+    )
 
-              raise RuntimeError(
-                  f"Gemini TTS unavailable after 3 attempts for {voice_name}: {last_error}"
-              )
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {
+                        "text": prompt
+                    }
+                ]
+            }
+        ],
+        "generationConfig": {
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {
+                "voiceConfig": {
+                    "prebuiltVoiceConfig": {
+                        "voiceName": voice_name
+                    }
+                }
+            }
+        }
+    }
 
+    last_error = None
+
+    for attempt in range(1, 4):
+
+        try:
+            print(
+                f"Gemini {voice_name} "
+                f"batch attempt {attempt}/3"
+            )
+
+            response = requests.post(
+                url,
+                json=payload,
+                timeout=180
+            )
+
+            print(
+                f"Gemini HTTP status: "
+                f"{response.status_code}"
+            )
+
+            if response.status_code != 200:
+                raise RuntimeError(
+                    f"Gemini HTTP {response.status_code}: "
+                    f"{response.text[:1500]}"
+                )
+
+            data = response.json()
+
+            # Make sure candidates exist
+            candidates = data.get("candidates") or []
+
+            if not candidates:
+                raise RuntimeError(
+                    "Gemini returned no candidates. "
+                    f"Response: {json.dumps(data)[:2000]}"
+                )
+
+            candidate = candidates[0]
+
+            # Check why generation stopped
+            finish_reason = candidate.get(
+                "finishReason",
+                "UNKNOWN"
+            )
+
+            print(
+                f"Gemini finish reason: "
+                f"{finish_reason}"
+            )
+
+            content = candidate.get("content")
+
+            if not content:
+                raise RuntimeError(
+                    "Gemini candidate contained no content. "
+                    f"Finish reason: {finish_reason}. "
+                    f"Candidate: {json.dumps(candidate)[:2000]}"
+                )
+
+            parts = content.get("parts") or []
+
+            if not parts:
+                raise RuntimeError(
+                    "Gemini returned content but no parts. "
+                    f"Content: {json.dumps(content)[:2000]}"
+                )
+
+            inline = None
+
+            for part in parts:
+                if "inlineData" in part:
+                    inline = part["inlineData"]
+                    break
+
+                if "inline_data" in part:
+                    inline = part["inline_data"]
+                    break
+
+            if not inline:
+                raise RuntimeError(
+                    "Gemini returned no audio inlineData. "
+                    f"Parts: {json.dumps(parts)[:2000]}"
+                )
+
+            encoded_audio = inline.get("data")
+
+            if not encoded_audio:
+                raise RuntimeError(
+                    "Gemini inlineData contained no audio data"
+                )
+
+            mime = (
+                inline.get("mimeType")
+                or inline.get("mime_type")
+                or ""
+            ).lower()
+
+            print(
+                f"Gemini audio MIME: {mime}"
+            )
+
+            audio_bytes = base64.b64decode(
+                encoded_audio
+            )
+
+            if len(audio_bytes) < 1000:
+                raise RuntimeError(
+                    "Gemini returned an empty or "
+                    "invalid audio payload"
+                )
+
+            wav_file = output_mp3.replace(
+                ".mp3",
+                ".wav"
+            )
+
+            # Remove old files from previous attempts
+            for old_file in [
+                output_mp3,
+                wav_file
+            ]:
+                if os.path.exists(old_file):
+                    os.remove(old_file)
+
+            if "wav" in mime:
+                with open(
+                    wav_file,
+                    "wb"
+                ) as f:
+                    f.write(audio_bytes)
+
+            elif (
+                "mpeg" in mime
+                or "mp3" in mime
+            ):
+                with open(
+                    output_mp3,
+                    "wb"
+                ) as f:
+                    f.write(audio_bytes)
+
+            else:
+                # Gemini TTS commonly returns raw PCM
+                write_pcm_wav(
+                    audio_bytes,
+                    wav_file,
+                    24000
+                )
+
+            # Convert everything to one stable MP3 format
+            if not os.path.exists(output_mp3):
+
+                subprocess.run([
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    wav_file,
+                    "-c:a",
+                    "libmp3lame",
+                    "-b:a",
+                    "192k",
+                    "-ar",
+                    "48000",
+                    "-ac",
+                    "2",
+                    output_mp3
+                ], check=True)
+
+            if (
+                not os.path.exists(output_mp3)
+                or os.path.getsize(output_mp3) < 1000
+            ):
+                raise RuntimeError(
+                    "Gemini TTS output MP3 is invalid"
+                )
+
+            # Final audio validation
+            duration_text = subprocess.check_output([
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                output_mp3
+            ]).decode().strip()
+
+            if not duration_text:
+                raise RuntimeError(
+                    "ffprobe could not read Gemini TTS audio"
+                )
+
+            duration = float(duration_text)
+
+            if duration < 0.5:
+                raise RuntimeError(
+                    f"Gemini TTS audio too short: "
+                    f"{duration:.2f}s"
+                )
+
+            print(
+                f"Gemini {voice_name} SUCCESS - "
+                f"{duration:.2f}s"
+            )
+
+            return
+
+        except Exception as exc:
+
+            last_error = exc
+
+            print(
+                f"Gemini {voice_name} "
+                f"batch attempt {attempt} failed:"
+            )
+
+            print(str(exc))
+
+            if attempt < 3:
+                wait_seconds = attempt * 5
+
+                print(
+                    f"Waiting {wait_seconds}s "
+                    "before retry..."
+                )
+
+                time.sleep(wait_seconds)
+
+    raise RuntimeError(
+        f"Gemini TTS unavailable after "
+        f"3 attempts for {voice_name}: "
+        f"{last_error}"
+    )
           def split_on_silence(input_file, expected_parts, prefix):
               detect = subprocess.run([
                   "ffmpeg", "-hide_banner", "-i", input_file,
