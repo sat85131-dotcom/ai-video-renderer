@@ -29,7 +29,7 @@ jobs:
           printf '%s' "$SCENES_JSON" > scenes.json
           python3 -m json.tool scenes.json
 
-      - name: Render scenes with 2-request Gemini Tamil voices
+      - name: Render scenes with single Gemini Tamil female voice
         run: |
           python3 <<'PY'
           import base64
@@ -43,8 +43,7 @@ jobs:
 
           GEMINI_MODEL = "gemini-2.5-flash-preview-tts"
           FEMALE_GEMINI_VOICE = "Despina"
-          MALE_GEMINI_VOICE = "Enceladus"
-          MARKER_GAP = 1.0
+                    MARKER_GAP = 1.0
 
           with open("scenes.json", "r", encoding="utf-8") as f:
               scenes = json.load(f)
@@ -303,35 +302,22 @@ jobs:
               with open(output_file, "w", encoding="utf-8-sig") as f:
                   f.write("\n".join(lines))
 
-          odd_scenes = [(i, s) for i, s in enumerate(scenes, start=1) if i % 2 == 1]
-          even_scenes = [(i, s) for i, s in enumerate(scenes, start=1) if i % 2 == 0]
+          all_scenes = [(i, s) for i, s in enumerate(scenes, start=1)]
 
-          print("Generating female batch: ONE Gemini request")
+          print("Generating ALL 8 scenes with female Gemini voice: ONE request")
           gemini_voice_batch(
-              [s.get("voice_text", "") for _, s in odd_scenes],
+              [s.get("voice_text", "") for _, s in all_scenes],
               "segments/female_batch.mp3",
               FEMALE_GEMINI_VOICE,
               "natural, warm, energetic female"
           )
-          female_parts = split_on_silence(
-              "segments/female_batch.mp3", len(odd_scenes), "female_part"
-          )
 
-          print("Generating male batch: ONE Gemini request")
-          gemini_voice_batch(
-              [s.get("voice_text", "") for _, s in even_scenes],
-              "segments/male_batch.mp3",
-              MALE_GEMINI_VOICE,
-              "natural, warm, energetic male"
-          )
-          male_parts = split_on_silence(
-              "segments/male_batch.mp3", len(even_scenes), "male_part"
+          female_parts = split_on_silence(
+              "segments/female_batch.mp3", len(all_scenes), "female_part"
           )
 
           voice_by_scene = {}
-          for (scene_no, _), path in zip(odd_scenes, female_parts):
-              voice_by_scene[scene_no] = path
-          for (scene_no, _), path in zip(even_scenes, male_parts):
+          for (scene_no, _), path in zip(all_scenes, female_parts):
               voice_by_scene[scene_no] = path
 
           for i, scene in enumerate(scenes, start=1):
@@ -360,7 +346,7 @@ jobs:
               ], check=True)
 
               print(
-                  f"Voice: {FEMALE_GEMINI_VOICE if i % 2 == 1 else MALE_GEMINI_VOICE}"
+                  f"Voice: {FEMALE_GEMINI_VOICE} female"
               )
 
               duration = float(subprocess.check_output([
@@ -405,7 +391,7 @@ jobs:
                   "-movflags", "+faststart", output_file
               ], check=True)
 
-          print("ALL 8 SCENES RENDERED WITH 2 GEMINI TTS REQUESTS + VALIDATED AUDIO SPLITS")
+          print("ALL 8 SCENES RENDERED WITH ONE GEMINI FEMALE TTS REQUEST + VALIDATED AUDIO SPLITS")
           PY
 
       - name: Join scenes with dynamic transitions
