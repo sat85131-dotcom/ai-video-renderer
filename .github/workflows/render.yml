@@ -12,7 +12,6 @@ jobs:
   render:
     runs-on: ubuntu-latest
 
-
     steps:
       - name: Install tools
         run: |
@@ -27,24 +26,23 @@ jobs:
           printf '%s' "$SCENES_JSON" > scenes.json
           python3 -m json.tool scenes.json
 
-      - name: Render scenes with free Tamil female voice
+      - name: Render scenes with free English female voice
         run: |
           python3 <<'PY'
           import json
           import os
           import re
           import subprocess
-          import time
           import edge_tts
 
-          FEMALE_VOICE = "ta-IN-PallaviNeural"
+          FEMALE_VOICE = "en-US-AriaNeural"
 
           with open("scenes.json", "r", encoding="utf-8") as f:
               scenes = json.load(f)
 
           os.makedirs("segments", exist_ok=True)
 
-          def normalize_spoken_tamil(text):
+          def normalize_spoken_english(text):
               text = str(text or "").strip()
               text = text.replace("…", ".").replace("—", ",").replace("–", ",")
               text = re.sub(r"\.{2,}", ".", text)
@@ -55,11 +53,13 @@ jobs:
               return text.strip()
 
           def make_voice(text, output_mp3):
-              spoken_text = normalize_spoken_tamil(text)
-              if not spoken_text:
-                  raise RuntimeError("Tamil voice text is empty")
+              spoken_text = normalize_spoken_english(text)
 
-              print(f"Generating Tamil female voice with {FEMALE_VOICE}")
+              if not spoken_text:
+                  raise RuntimeError("English voice text is empty")
+
+              print(f"Generating English female voice with {FEMALE_VOICE}")
+
               communicate = edge_tts.Communicate(
                   spoken_text,
                   voice=FEMALE_VOICE,
@@ -67,111 +67,231 @@ jobs:
                   pitch="-2Hz",
                   volume="+0%"
               )
+
               communicate.save_sync(output_mp3)
 
               if not os.path.exists(output_mp3) or os.path.getsize(output_mp3) < 1000:
-                  raise RuntimeError("Tamil female TTS created no valid audio")
+                  raise RuntimeError("English female TTS created no valid audio")
 
-              duration = float(subprocess.check_output([
-                  "ffprobe", "-v", "error",
-                  "-show_entries", "format=duration",
-                  "-of", "default=noprint_wrappers=1:nokey=1",
-                  output_mp3
-              ]).decode().strip())
+              duration = float(
+                  subprocess.check_output([
+                      "ffprobe",
+                      "-v", "error",
+                      "-show_entries", "format=duration",
+                      "-of", "default=noprint_wrappers=1:nokey=1",
+                      output_mp3
+                  ]).decode().strip()
+              )
 
               if duration < 0.20:
-                  raise RuntimeError("Tamil female TTS audio is too short")
+                  raise RuntimeError("English female TTS audio is too short")
 
               return spoken_text
 
           def build_fallback_timings(spoken_text, audio_duration):
-              tokens = [t for t in re.split(r"\s+", spoken_text.strip()) if t]
+              tokens = [
+                  t for t in re.split(r"\s+", spoken_text.strip()) if t
+              ]
+
               if not tokens:
                   return []
-              usable_duration = max(float(audio_duration) - 0.10, 0.20)
+
+              usable_duration = max(
+                  float(audio_duration) - 0.10,
+                  0.20
+              )
+
               weights = []
+
               for token in tokens:
-                  cleaned = re.sub(r"[^\w\u0B80-\u0BFF]", "", token, flags=re.UNICODE)
+                  cleaned = re.sub(r"[^\w]", "", token)
                   weights.append(max(len(cleaned), 1))
+
               total_weight = sum(weights)
               cursor = 0.0
               words = []
-              for index, (token, weight) in enumerate(zip(tokens, weights)):
-                  share = usable_duration * (weight / total_weight)
-                  start = cursor
-                  end = usable_duration if index == len(tokens) - 1 else min(
-                      usable_duration, cursor + max(share, 0.08)
+
+              for index, (token, weight) in enumerate(
+                  zip(tokens, weights)
+              ):
+                  share = usable_duration * (
+                      weight / total_weight
                   )
+
+                  start = cursor
+
+                  if index == len(tokens) - 1:
+                      end = usable_duration
+                  else:
+                      end = min(
+                          usable_duration,
+                          cursor + max(share, 0.08)
+                      )
+
                   if end <= start:
-                      end = min(usable_duration, start + 0.08)
-                  words.append({"text": token.strip(), "start": start, "end": end})
+                      end = min(
+                          usable_duration,
+                          start + 0.08
+                      )
+
+                  words.append({
+                      "text": token.strip(),
+                      "start": start,
+                      "end": end
+                  })
+
                   cursor = end
+
               return words
 
           def ass_time(seconds):
               hours = int(seconds // 3600)
               minutes = int((seconds % 3600) // 60)
               secs = seconds % 60
-              return f"{hours}:{minutes:02d}:{secs:05.2f}"
+
+              return (
+                  f"{hours}:"
+                  f"{minutes:02d}:"
+                  f"{secs:05.2f}"
+              )
 
           def escape_ass(text):
               return (
-                  str(text).replace("\\", r"\\").replace("{", r"\{")
-                  .replace("}", r"\}").replace("\n", " ").strip()
+                  str(text)
+                  .replace("\\", r"\\")
+                  .replace("{", r"\{")
+                  .replace("}", r"\}")
+                  .replace("\n", " ")
+                  .strip()
               )
 
           def create_ass(words, output_file):
               lines = [
-                  "[Script Info]", "ScriptType: v4.00+", "PlayResX: 1080",
-                  "PlayResY: 1920", "WrapStyle: 2", "ScaledBorderAndShadow: yes", "",
+                  "[Script Info]",
+                  "ScriptType: v4.00+",
+                  "PlayResX: 1080",
+                  "PlayResY: 1920",
+                  "WrapStyle: 2",
+                  "ScaledBorderAndShadow: yes",
+                  "",
                   "[V4+ Styles]",
                   "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding",
-                  "Style: Default,Noto Sans Tamil,66,&H00FFFFFF,&H00FFFFFF,&H00000000,&H70000000,-1,0,0,0,100,100,0,0,1,5,1,2,65,65,305,1",
-                  "", "[Events]",
+                  "Style: Default,Noto Sans,66,&H00FFFFFF,&H00FFFFFF,&H00000000,&H70000000,-1,0,0,0,100,100,0,0,1,5,1,2,65,65,305,1",
+                  "",
+                  "[Events]",
                   "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text",
               ]
+
               chunk_size = 2
+
               for index, word in enumerate(words):
-                  group_start = (index // chunk_size) * chunk_size
-                  group_end = min(group_start + chunk_size, len(words))
-                  group = words[group_start:group_end]
+                  group_start = (
+                      index // chunk_size
+                  ) * chunk_size
+
+                  group_end = min(
+                      group_start + chunk_size,
+                      len(words)
+                  )
+
+                  group = words[
+                      group_start:group_end
+                  ]
+
                   display_words = []
+
                   for local_index, item in enumerate(group):
-                      actual_index = group_start + local_index
-                      safe_word = escape_ass(item["text"])
+                      actual_index = (
+                          group_start + local_index
+                      )
+
+                      safe_word = escape_ass(
+                          item["text"]
+                      )
+
                       if actual_index == index:
                           display_words.append(
-                              r"{\1c&H0000FF00&\b1}" + safe_word + r"{\1c&H00FFFFFF&\b1}"
+                              r"{\1c&H0000FF00&\b1}"
+                              + safe_word
+                              + r"{\1c&H00FFFFFF&\b1}"
                           )
                       else:
-                          display_words.append(r"{\1c&H00FFFFFF&\b1}" + safe_word)
+                          display_words.append(
+                              r"{\1c&H00FFFFFF&\b1}"
+                              + safe_word
+                          )
+
                   caption = " ".join(display_words)
+
                   start = float(word["start"])
+
                   if index + 1 < len(words):
-                      end = max(float(words[index + 1]["start"]), start + 0.08)
+                      end = max(
+                          float(
+                              words[index + 1]["start"]
+                          ),
+                          start + 0.08
+                      )
                   else:
-                      end = max(float(word["end"]) + 0.08, start + 0.10)
+                      end = max(
+                          float(word["end"]) + 0.08,
+                          start + 0.10
+                      )
+
                   lines.append(
-                      f"Dialogue: 0,{ass_time(start)},{ass_time(end)},"
-                      f"Default,,0,0,0,,{{\\an2}}{caption}"
+                      f"Dialogue: 0,"
+                      f"{ass_time(start)},"
+                      f"{ass_time(end)},"
+                      f"Default,,0,0,0,,"
+                      f"{{\\an2}}{caption}"
                   )
-              with open(output_file, "w", encoding="utf-8-sig") as f:
+
+              with open(
+                  output_file,
+                  "w",
+                  encoding="utf-8-sig"
+              ) as f:
                   f.write("\n".join(lines))
 
-          for i, scene in enumerate(scenes, start=1):
+          for i, scene in enumerate(
+              scenes,
+              start=1
+          ):
               number = str(i).zfill(2)
-              video_url = scene.get("video_url")
-              voice_text = normalize_spoken_tamil(scene.get("voice_text", ""))
+
+              video_url = scene.get(
+                  "video_url"
+              )
+
+              voice_text = normalize_spoken_english(
+                  scene.get("voice_text", "")
+              )
 
               if not video_url:
-                  raise RuntimeError(f"Scene {i}: video_url missing")
-              if not voice_text:
-                  raise RuntimeError(f"Scene {i}: voice_text missing")
+                  raise RuntimeError(
+                      f"Scene {i}: video_url missing"
+                  )
 
-              source_video = f"segments/source_{number}.mp4"
-              voice_file = f"segments/voice_{number}.mp3"
-              subtitle_file = os.path.abspath(f"segments/subtitle_{number}.ass")
-              output_file = f"segments/scene_{number}.mp4"
+              if not voice_text:
+                  raise RuntimeError(
+                      f"Scene {i}: voice_text missing"
+                  )
+
+              source_video = (
+                  f"segments/source_{number}.mp4"
+              )
+
+              voice_file = (
+                  f"segments/voice_{number}.mp3"
+              )
+
+              subtitle_file = os.path.abspath(
+                  f"segments/subtitle_{number}.ass"
+              )
+
+              output_file = (
+                  f"segments/scene_{number}.mp4"
+              )
 
               print("==========================")
               print(f"SCENE {i}")
@@ -179,57 +299,118 @@ jobs:
               print("Downloading clip...")
 
               subprocess.run([
-                  "curl", "-L", "--fail", "--retry", "3",
-                  "--retry-delay", "2", video_url, "-o", source_video
+                  "curl",
+                  "-L",
+                  "--fail",
+                  "--retry", "3",
+                  "--retry-delay", "2",
+                  video_url,
+                  "-o",
+                  source_video
               ], check=True)
 
-              print(f"Voice: {FEMALE_VOICE} female")
-              spoken_text = make_voice(voice_text, voice_file)
-              print("TTS text:", spoken_text)
+              print(
+                  f"Voice: {FEMALE_VOICE} female"
+              )
 
-              duration = float(subprocess.check_output([
-                  "ffprobe", "-v", "error", "-show_entries", "format=duration",
-                  "-of", "default=noprint_wrappers=1:nokey=1", voice_file
-              ]).decode().strip())
+              spoken_text = make_voice(
+                  voice_text,
+                  voice_file
+              )
 
-              words = build_fallback_timings(voice_text, duration)
+              print(
+                  "TTS text:",
+                  spoken_text
+              )
+
+              duration = float(
+                  subprocess.check_output([
+                      "ffprobe",
+                      "-v", "error",
+                      "-show_entries",
+                      "format=duration",
+                      "-of",
+                      "default=noprint_wrappers=1:nokey=1",
+                      voice_file
+                  ]).decode().strip()
+              )
+
+              words = build_fallback_timings(
+                  voice_text,
+                  duration
+              )
+
               if not words:
-                  raise RuntimeError(f"Scene {i}: could not build Tamil caption timings")
-              create_ass(words, subtitle_file)
+                  raise RuntimeError(
+                      f"Scene {i}: could not build English caption timings"
+                  )
+
+              create_ass(
+                  words,
+                  subtitle_file
+              )
 
               scene_duration = duration + 0.12
-              print(f"Voice duration: {duration:.2f}s")
 
-              subtitle_filter = f"subtitles='{subtitle_file}':fontsdir='/usr/share/fonts'"
+              print(
+                  f"Voice duration: "
+                  f"{duration:.2f}s"
+              )
+
+              subtitle_filter = (
+                  f"subtitles='{subtitle_file}':"
+                  f"fontsdir='/usr/share/fonts'"
+              )
+
               zoom_filter = (
                   "zoompan="
                   "z='min(zoom+0.0007,1.05)':"
                   "x='iw/2-(iw/zoom/2)':"
                   "y='ih/2-(ih/zoom/2)':"
-                  "d=1:s=1080x1920:fps=30,"
+                  "d=1:"
+                  "s=1080x1920:"
+                  "fps=30,"
               )
+
               video_filter = (
-                  "scale=1080:1920:force_original_aspect_ratio=increase,"
-                  "crop=1080:1920," + zoom_filter +
-                  "eq=contrast=1.06:saturation=1.10:brightness=0.01,"
-                  + subtitle_filter + ",format=yuv420p"
+                  "scale=1080:1920:"
+                  "force_original_aspect_ratio=increase,"
+                  "crop=1080:1920,"
+                  + zoom_filter +
+                  "eq=contrast=1.06:"
+                  "saturation=1.10:"
+                  "brightness=0.01,"
+                  + subtitle_filter +
+                  ",format=yuv420p"
               )
 
               print("Rendering scene...")
+
               subprocess.run([
-                  "ffmpeg", "-y",
-                  "-stream_loop", "-1", "-i", source_video,
+                  "ffmpeg",
+                  "-y",
+                  "-stream_loop", "-1",
+                  "-i", source_video,
                   "-i", voice_file,
                   "-t", str(scene_duration),
                   "-vf", video_filter,
-                  "-map", "0:v:0", "-map", "1:a:0",
-                  "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
-                  "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+                  "-map", "0:v:0",
+                  "-map", "1:a:0",
+                  "-c:v", "libx264",
+                  "-preset", "veryfast",
+                  "-crf", "22",
+                  "-c:a", "aac",
+                  "-b:a", "192k",
+                  "-ar", "48000",
+                  "-ac", "2",
                   "-af", "apad=pad_dur=0.12",
-                  "-movflags", "+faststart", output_file
+                  "-movflags", "+faststart",
+                  output_file
               ], check=True)
 
-          print("ALL 8 SCENES RENDERED WITH FREE TAMIL FEMALE TTS")
+          print(
+              "ALL 8 SCENES RENDERED WITH FREE ENGLISH FEMALE TTS"
+          )
           PY
 
       - name: Join scenes with dynamic transitions
@@ -324,7 +505,10 @@ jobs:
           video_left = "v0"
           audio_left = "a0"
 
-          for i in range(1, len(scenes)):
+          for i in range(
+              1,
+              len(scenes)
+          ):
               video_output = f"vx{i}"
               audio_output = f"ax{i}"
 
@@ -338,7 +522,8 @@ jobs:
                   f"[v{i}]"
                   f"xfade="
                   f"transition=fade:"
-                  f"duration={transition_duration:.3f}:"
+                  f"duration="
+                  f"{transition_duration:.3f}:"
                   f"offset={offset:.3f}"
                   f"[{video_output}]"
               )
@@ -404,7 +589,8 @@ jobs:
           ])
 
           print(
-              "Rendering final video with dynamic transitions..."
+              "Rendering final video "
+              "with dynamic transitions..."
           )
 
           subprocess.run(
@@ -426,7 +612,9 @@ jobs:
 
           MUSIC_URL = "https://cdn.pixabay.com/download/audio/2022/03/15/audio_115b9b04e5.mp3"
 
-          print("Downloading background music...")
+          print(
+              "Downloading background music..."
+          )
 
           try:
               urllib.request.urlretrieve(
@@ -441,7 +629,8 @@ jobs:
               )
 
               print(
-                  "Keeping video without background music."
+                  "Keeping video without "
+                  "background music."
               )
 
               raise SystemExit(0)
@@ -459,7 +648,8 @@ jobs:
           duration = float(duration)
 
           print(
-              f"Final video duration: {duration:.2f}s"
+              f"Final video duration: "
+              f"{duration:.2f}s"
           )
 
           filter_complex = (
@@ -544,7 +734,8 @@ jobs:
           )
 
           print(
-              "BACKGROUND MUSIC + VOICE DUCKING READY"
+              "BACKGROUND MUSIC + "
+              "VOICE DUCKING READY"
           )
           PY
 
@@ -560,80 +751,4 @@ jobs:
             -ac 2 \
             whoosh.wav
 
-          ffmpeg -y \
-            -f lavfi \
-            -i "sine=frequency=75:duration=0.35:sample_rate=48000" \
-            -af "afade=t=out:st=0:d=0.35,volume=0.55" \
-            -ar 48000 \
-            -ac 2 \
-            thump.wav
-
-          ffmpeg -y \
-            -i whoosh.wav \
-            -i thump.wav \
-            -filter_complex "[0:a][1:a]amix=inputs=2:duration=longest:normalize=0,alimiter=limit=0.90[sfx]" \
-            -map "[sfx]" \
-            -ar 48000 \
-            -ac 2 \
-            hook_sfx.wav
-
-          ffmpeg -y \
-            -i final.mp4 \
-            -i hook_sfx.wav \
-            -filter_complex "[1:a]volume=0.35[sfx];[0:a][sfx]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95[aout]" \
-            -map 0:v:0 \
-            -map "[aout]" \
-            -c:v copy \
-            -c:a aac \
-            -b:a 192k \
-            -ar 48000 \
-            -ac 2 \
-            -movflags +faststart \
-            final_sfx.mp4
-
-          mv final_sfx.mp4 final.mp4
-
-          echo "HOOK IMPACT SFX READY"
-
-      - name: Fix final video compatibility
-        run: |
-          echo "Fixing MP4 for mobile, browser and YouTube playback..."
-
-          ffmpeg -y \
-            -fflags +genpts \
-            -i final.mp4 \
-            -map 0:v:0 \
-            -map 0:a:0 \
-            -c:v libx264 \
-            -preset veryfast \
-            -crf 22 \
-            -pix_fmt yuv420p \
-            -profile:v high \
-            -level 4.1 \
-            -r 30 \
-            -c:a aac \
-            -b:a 192k \
-            -ar 48000 \
-            -ac 2 \
-            -movflags +faststart \
-            final_fixed.mp4
-
-          mv final_fixed.mp4 final.mp4
-
-          echo "PLAYBACK COMPATIBILITY FIXED"
-
-      - name: Check final video
-        run: |
-          echo "===== FINAL VIDEO ====="
-
-          ffprobe \
-            -v error \
-            -show_entries format=duration \
-            -show_entries stream=codec_name,width,height \
-            final.mp4
-
-      - name: Upload final video
-        uses: actions/upload-artifact@v4
-        with:
-          name: final-video
-          path: final.mp4
+          ffmpeg -
