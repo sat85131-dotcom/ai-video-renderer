@@ -29,7 +29,7 @@ jobs:
           printf '%s' "$SCENES_JSON" > scenes.json
           python3 -m json.tool scenes.json
 
-      - name: Render scenes with 2-request Gemini Tamil voices
+      - name: Render scenes with 1-request Gemini Tamil female voice
         run: |
           python3 <<'PY'
           import base64
@@ -43,11 +43,18 @@ jobs:
 
           GEMINI_MODEL = "gemini-2.5-flash-preview-tts"
           FEMALE_GEMINI_VOICE = "Despina"
-          MALE_GEMINI_VOICE = "Enceladus"
           MARKER_GAP = 1.0
 
           with open("scenes.json", "r", encoding="utf-8") as f:
               scenes = json.load(f)
+
+          if not isinstance(scenes, list):
+              raise RuntimeError("scenes.json must contain a JSON array")
+
+          if len(scenes) != 8:
+              raise RuntimeError(
+                  f"Expected exactly 8 scenes, got {len(scenes)}"
+              )
 
           os.makedirs("segments", exist_ok=True)
 
@@ -61,52 +68,104 @@ jobs:
               text = re.sub(r"\s+", " ", text)
               return text.strip()
 
-          def write_pcm_wav(pcm_bytes, output_wav, sample_rate=24000):
+          def write_pcm_wav(
+              pcm_bytes,
+              output_wav,
+              sample_rate=24000
+          ):
               with wave.open(output_wav, "wb") as wf:
                   wf.setnchannels(1)
                   wf.setsampwidth(2)
                   wf.setframerate(sample_rate)
                   wf.writeframes(pcm_bytes)
 
-          def gemini_voice_batch(texts, output_mp3, voice_name, voice_style):
-              api_key = os.environ.get("GEMINI_API_KEY", "").strip()
-          
+          def get_audio_duration(path):
+              value = subprocess.check_output([
+                  "ffprobe",
+                  "-v", "error",
+                  "-show_entries", "format=duration",
+                  "-of",
+                  "default=noprint_wrappers=1:nokey=1",
+                  path
+              ]).decode().strip()
+
+              if not value:
+                  raise RuntimeError(
+                      f"Could not read audio duration: {path}"
+                  )
+
+              return float(value)
+
+          def gemini_voice_batch(
+              texts,
+              output_mp3,
+              voice_name
+          ):
+              api_key = os.environ.get(
+                  "GEMINI_API_KEY",
+                  ""
+              ).strip()
+
               if not api_key:
-                  raise RuntimeError("GEMINI_API_KEY secret is missing")
-          
+                  raise RuntimeError(
+                      "GEMINI_API_KEY secret is missing"
+                  )
+
               numbered = []
-          
+
               for n, text in enumerate(texts, start=1):
                   clean_text = normalize_spoken_tamil(text)
-          
+
                   if not clean_text:
-                      raise RuntimeError(f"Empty Tamil text in PART {n}")
-          
+                      raise RuntimeError(
+                          f"Empty Tamil text in PART {n}"
+                      )
+
                   numbered.append(
                       f"PART {n}: {clean_text}"
                   )
-          
+
               script = "\n\n".join(numbered)
-          
+
               prompt = (
-                  "Create one continuous Tamil narration audio from the numbered PARTS below. "
-                  f"Use a {voice_style} Tamil YouTube storyteller voice. "
-                  "Speak ONLY the actual Tamil sentence after each PART label. "
-                  "Do NOT speak the words PART or the numbers. "
-                  f"Insert approximately {MARKER_GAP:.0f} second of clean silence between every part. "
-                  "Do not add music, sound effects, commentary, translations, or extra words. "
-                  "Use authentic natural spoken Tamil pronunciation. "
-                  "Keep the delivery warm, emotional, conversational and realistic, "
-                  "like a family conversation in a Tamil short film. "
-                  "Do not exaggerate the emotion.\n\n"
+                  "Create one continuous Tamil narration audio "
+                  "from the numbered PARTS below. "
+
+                  "Use one consistent natural female Tamil "
+                  "YouTube storyteller voice for the entire audio. "
+
+                  "The delivery should be curious, warm, energetic "
+                  "and conversational. "
+
+                  "Use authentic native spoken Tamil pronunciation. "
+
+                  "Speak ONLY the Tamil sentence written after "
+                  "each PART label. "
+
+                  "Do NOT speak the word PART or any PART number. "
+
+                  f"Insert approximately {MARKER_GAP:.0f} second "
+                  "of clean silence between every part. "
+
+                  "Keep each part clearly separated by silence. "
+
+                  "Do not add music, sound effects, translations, "
+                  "commentary or extra words. "
+
+                  "Do not sound like a newsreader. "
+                  "Do not exaggerate emotion. "
+
+                  "Keep the pacing natural and suitable for "
+                  "a fast YouTube Short.\n\n"
                   + script
               )
-          
+
               url = (
-                  "https://generativelanguage.googleapis.com/v1beta/models/"
+                  "https://generativelanguage.googleapis.com/"
+                  "v1beta/models/"
                   f"{GEMINI_MODEL}:generateContent?key={api_key}"
               )
-          
+
               payload = {
                   "contents": [
                       {
@@ -118,7 +177,9 @@ jobs:
                       }
                   ],
                   "generationConfig": {
-                      "responseModalities": ["AUDIO"],
+                      "responseModalities": [
+                          "AUDIO"
+                      ],
                       "speechConfig": {
                           "voiceConfig": {
                               "prebuiltVoiceConfig": {
@@ -128,139 +189,165 @@ jobs:
                       }
                   }
               }
-          
+
               last_error = None
-          
+
               for attempt in range(1, 4):
-          
                   try:
                       print(
                           f"Gemini {voice_name} "
-                          f"batch attempt {attempt}/3"
+                          f"attempt {attempt}/3"
                       )
-          
+
                       response = requests.post(
                           url,
                           json=payload,
                           timeout=180
                       )
-          
+
                       print(
-                          f"Gemini HTTP status: "
-                          f"{response.status_code}"
+                          "Gemini HTTP status:",
+                          response.status_code
                       )
-          
+
+                      if response.status_code == 429:
+                          print(
+                              "Gemini TTS quota exceeded."
+                          )
+
+                          print(
+                              response.text[:2000]
+                          )
+
+                          raise SystemExit(
+                              "GEMINI TTS DAILY QUOTA EXHAUSTED. "
+                              "Stopping without unnecessary retries."
+                          )
+
                       if response.status_code != 200:
                           raise RuntimeError(
-                              f"Gemini HTTP {response.status_code}: "
+                              f"Gemini HTTP "
+                              f"{response.status_code}: "
                               f"{response.text[:1500]}"
                           )
-          
+
                       data = response.json()
-          
-                      # Make sure candidates exist
-                      candidates = data.get("candidates") or []
-          
+
+                      candidates = (
+                          data.get("candidates")
+                          or []
+                      )
+
                       if not candidates:
                           raise RuntimeError(
-                              "Gemini returned no candidates. "
-                              f"Response: {json.dumps(data)[:2000]}"
+                              "Gemini returned no candidates: "
+                              + json.dumps(data)[:2000]
                           )
-          
+
                       candidate = candidates[0]
-          
-                      # Check why generation stopped
+
                       finish_reason = candidate.get(
                           "finishReason",
                           "UNKNOWN"
                       )
-          
+
                       print(
-                          f"Gemini finish reason: "
-                          f"{finish_reason}"
+                          "Gemini finish reason:",
+                          finish_reason
                       )
-          
-                      content = candidate.get("content")
-          
+
+                      content = candidate.get(
+                          "content"
+                      )
+
                       if not content:
                           raise RuntimeError(
-                              "Gemini candidate contained no content. "
-                              f"Finish reason: {finish_reason}. "
-                              f"Candidate: {json.dumps(candidate)[:2000]}"
+                              "Gemini candidate contained "
+                              "no content. Finish reason: "
+                              f"{finish_reason}"
                           )
-          
-                      parts = content.get("parts") or []
-          
+
+                      parts = (
+                          content.get("parts")
+                          or []
+                      )
+
                       if not parts:
                           raise RuntimeError(
-                              "Gemini returned content but no parts. "
-                              f"Content: {json.dumps(content)[:2000]}"
+                              "Gemini returned content "
+                              "but no parts"
                           )
-          
+
                       inline = None
-          
+
                       for part in parts:
                           if "inlineData" in part:
-                              inline = part["inlineData"]
+                              inline = part[
+                                  "inlineData"
+                              ]
                               break
-          
+
                           if "inline_data" in part:
-                              inline = part["inline_data"]
+                              inline = part[
+                                  "inline_data"
+                              ]
                               break
-          
+
                       if not inline:
                           raise RuntimeError(
-                              "Gemini returned no audio inlineData. "
-                              f"Parts: {json.dumps(parts)[:2000]}"
+                              "Gemini returned no "
+                              "audio inlineData"
                           )
-          
-                      encoded_audio = inline.get("data")
-          
+
+                      encoded_audio = inline.get(
+                          "data"
+                      )
+
                       if not encoded_audio:
                           raise RuntimeError(
-                              "Gemini inlineData contained no audio data"
+                              "Gemini audio data missing"
                           )
-          
+
                       mime = (
                           inline.get("mimeType")
                           or inline.get("mime_type")
                           or ""
                       ).lower()
-          
+
                       print(
-                          f"Gemini audio MIME: {mime}"
+                          "Gemini audio MIME:",
+                          mime
                       )
-          
+
                       audio_bytes = base64.b64decode(
                           encoded_audio
                       )
-          
+
                       if len(audio_bytes) < 1000:
                           raise RuntimeError(
-                              "Gemini returned an empty or "
-                              "invalid audio payload"
+                              "Gemini returned invalid "
+                              "audio payload"
                           )
-          
+
                       wav_file = output_mp3.replace(
                           ".mp3",
                           ".wav"
                       )
-          
-                      # Remove old files from previous attempts
+
                       for old_file in [
                           output_mp3,
                           wav_file
                       ]:
                           if os.path.exists(old_file):
                               os.remove(old_file)
-          
+
                       if "wav" in mime:
                           with open(
                               wav_file,
                               "wb"
                           ) as f:
                               f.write(audio_bytes)
-          
+
                       elif (
                           "mpeg" in mime
                           or "mp3" in mime
@@ -270,18 +357,17 @@ jobs:
                               "wb"
                           ) as f:
                               f.write(audio_bytes)
-          
+
                       else:
-                          # Gemini TTS commonly returns raw PCM
                           write_pcm_wav(
                               audio_bytes,
                               wav_file,
                               24000
                           )
-          
-                      # Convert everything to one stable MP3 format
-                      if not os.path.exists(output_mp3):
-          
+
+                      if not os.path.exists(
+                          output_mp3
+                      ):
                           subprocess.run([
                               "ffmpeg",
                               "-y",
@@ -297,84 +383,84 @@ jobs:
                               "2",
                               output_mp3
                           ], check=True)
-          
+
                       if (
                           not os.path.exists(output_mp3)
-                          or os.path.getsize(output_mp3) < 1000
+                          or
+                          os.path.getsize(output_mp3)
+                          < 1000
                       ):
                           raise RuntimeError(
-                              "Gemini TTS output MP3 is invalid"
+                              "Gemini TTS MP3 invalid"
                           )
-          
-                      # Final audio validation
-                      duration_text = subprocess.check_output([
-                          "ffprobe",
-                          "-v",
-                          "error",
-                          "-show_entries",
-                          "format=duration",
-                          "-of",
-                          "default=noprint_wrappers=1:nokey=1",
+
+                      duration = get_audio_duration(
                           output_mp3
-                      ]).decode().strip()
-          
-                      if not duration_text:
-                          raise RuntimeError(
-                              "ffprobe could not read Gemini TTS audio"
-                          )
-          
-                      duration = float(duration_text)
-          
+                      )
+
                       if duration < 0.5:
                           raise RuntimeError(
-                              f"Gemini TTS audio too short: "
-                              f"{duration:.2f}s"
+                              "Gemini TTS audio "
+                              f"too short: {duration:.2f}s"
                           )
-          
+
                       print(
-                          f"Gemini {voice_name} SUCCESS - "
+                          f"Gemini {voice_name} SUCCESS"
+                      )
+
+                      print(
+                          f"Full voice duration: "
                           f"{duration:.2f}s"
                       )
-          
-                      return
-          
-                  except Exception as exc:
-          
-                      last_error = exc
-          
-                      print(
-                          f"Gemini {voice_name} "
-                          f"batch attempt {attempt} failed:"
-                      )
-          
-                      print(str(exc))
-          
-                      if attempt < 3:
-                          wait_seconds = attempt * 5
-          
-                          print(
-                              f"Waiting {wait_seconds}s "
-                              "before retry..."
-                          )
-          
-                          time.sleep(wait_seconds)
-          
-              raise RuntimeError(
-                  f"Gemini TTS unavailable after "
-                  f"3 attempts for {voice_name}: "
-                  f"{last_error}"
-              )
-          def split_on_silence(input_file, expected_parts, prefix):
-              duration = float(subprocess.check_output([
-                  "ffprobe", "-v", "error", "-show_entries", "format=duration",
-                  "-of", "default=noprint_wrappers=1:nokey=1", input_file
-              ]).decode().strip())
 
-              needed = max(expected_parts - 1, 0)
+                      return
+
+                  except SystemExit:
+                      raise
+
+                  except Exception as exc:
+                      last_error = exc
+
+                      print(
+                          f"Attempt {attempt} failed:"
+                      )
+
+                      print(str(exc))
+
+                      if attempt < 3:
+                          wait_seconds = (
+                              attempt * 5
+                          )
+
+                          print(
+                              f"Waiting {wait_seconds}s..."
+                          )
+
+                          time.sleep(
+                              wait_seconds
+                          )
+
+              raise RuntimeError(
+                  "Gemini TTS unavailable after "
+                  f"3 attempts: {last_error}"
+              )
+
+          def split_on_silence(
+              input_file,
+              expected_parts,
+              prefix
+          ):
+              duration = get_audio_duration(
+                  input_file
+              )
+
+              needed = max(
+                  expected_parts - 1,
+                  0
+              )
+
               gaps = []
 
-              # Gemini does not always keep every requested separator equally long.
-              # Try progressively more sensitive silence detection before falling back.
               detector_settings = [
                   ("-38dB", 0.45),
                   ("-36dB", 0.30),
@@ -384,293 +470,751 @@ jobs:
 
               for noise, min_silence in detector_settings:
                   detect = subprocess.run([
-                      "ffmpeg", "-hide_banner", "-i", input_file,
-                      "-af", f"silencedetect=noise={noise}:d={min_silence}",
-                      "-f", "null", "-"
-                  ], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                     text=True, check=False)
+                      "ffmpeg",
+                      "-hide_banner",
+                      "-i",
+                      input_file,
+                      "-af",
+                      (
+                          f"silencedetect="
+                          f"noise={noise}:"
+                          f"d={min_silence}"
+                      ),
+                      "-f",
+                      "null",
+                      "-"
+                  ],
+                      stdout=subprocess.PIPE,
+                      stderr=subprocess.PIPE,
+                      text=True,
+                      check=False
+                  )
 
-                  starts = [float(x) for x in re.findall(
-                      r"silence_start: ([0-9.]+)", detect.stderr
-                  )]
-                  ends = [float(x) for x in re.findall(
-                      r"silence_end: ([0-9.]+)", detect.stderr
-                  )]
+                  starts = [
+                      float(x)
+                      for x in re.findall(
+                          r"silence_start: ([0-9.]+)",
+                          detect.stderr
+                      )
+                  ]
+
+                  ends = [
+                      float(x)
+                      for x in re.findall(
+                          r"silence_end: ([0-9.]+)",
+                          detect.stderr
+                      )
+                  ]
 
                   found = []
-                  for s, e in zip(starts, ends):
-                      if e - s >= min_silence and s > 0.05 and e < duration - 0.05:
-                          found.append((s, e))
 
-                  # Prefer the longest internal pauses; they are most likely PART separators.
+                  for s, e in zip(
+                      starts,
+                      ends
+                  ):
+                      if (
+                          e - s >= min_silence
+                          and s > 0.05
+                          and e < duration - 0.05
+                      ):
+                          found.append(
+                              (s, e)
+                          )
+
                   found = sorted(
-                      found, key=lambda g: g[1] - g[0], reverse=True
+                      found,
+                      key=lambda g: (
+                          g[1] - g[0]
+                      ),
+                      reverse=True
                   )[:needed]
+
                   found = sorted(found)
 
                   if len(found) >= needed:
                       gaps = found
+
                       print(
-                          f"{prefix}: found {len(gaps)}/{needed} separators "
-                          f"with noise={noise}, d={min_silence}"
+                          f"Found "
+                          f"{len(gaps)}/"
+                          f"{needed} separators"
                       )
+
                       break
 
                   if len(found) > len(gaps):
                       gaps = found
 
               boundaries = [0.0]
+
               for s, e in gaps:
-                  boundaries.append((s + e) / 2.0)
-              boundaries.append(duration)
-              boundaries = sorted(set(boundaries))
-
-              # If Gemini omitted one or more separator pauses, do not crash the workflow.
-              # Add missing boundaries inside the largest current intervals. This is only
-              # a fallback; normally the detected Gemini separator silences are used.
-              while len(boundaries) < expected_parts + 1:
-                  intervals = []
-                  for i in range(len(boundaries) - 1):
-                      a, b = boundaries[i], boundaries[i + 1]
-                      intervals.append((b - a, i, a, b))
-
-                  _, insert_after, a, b = max(intervals, key=lambda x: x[0])
-                  midpoint = (a + b) / 2.0
-                  boundaries.insert(insert_after + 1, midpoint)
-                  print(
-                      f"{prefix}: Gemini omitted a separator; "
-                      f"using safe fallback boundary at {midpoint:.2f}s"
+                  boundaries.append(
+                      (s + e) / 2.0
                   )
 
-              # In case sensitive detection produced extras, keep exactly expected_parts.
-              if len(boundaries) > expected_parts + 1:
-                  internal = boundaries[1:-1]
-                  target = [duration * i / expected_parts for i in range(1, expected_parts)]
+              boundaries.append(
+                  duration
+              )
+
+              boundaries = sorted(
+                  set(boundaries)
+              )
+
+              while (
+                  len(boundaries)
+                  < expected_parts + 1
+              ):
+                  intervals = []
+
+                  for i in range(
+                      len(boundaries) - 1
+                  ):
+                      a = boundaries[i]
+                      b = boundaries[i + 1]
+
+                      intervals.append(
+                          (
+                              b - a,
+                              i,
+                              a,
+                              b
+                          )
+                      )
+
+                  (
+                      _,
+                      insert_after,
+                      a,
+                      b
+                  ) = max(
+                      intervals,
+                      key=lambda x: x[0]
+                  )
+
+                  midpoint = (
+                      a + b
+                  ) / 2.0
+
+                  boundaries.insert(
+                      insert_after + 1,
+                      midpoint
+                  )
+
+                  print(
+                      "Missing Gemini separator. "
+                      "Fallback boundary:",
+                      f"{midpoint:.2f}s"
+                  )
+
+              if (
+                  len(boundaries)
+                  > expected_parts + 1
+              ):
+                  internal = boundaries[
+                      1:-1
+                  ]
+
+                  target = [
+                      duration * i /
+                      expected_parts
+                      for i in range(
+                          1,
+                          expected_parts
+                      )
+                  ]
+
                   chosen = []
                   remaining = internal[:]
+
                   for t in target:
                       if not remaining:
                           break
-                      best = min(remaining, key=lambda x: abs(x - t))
+
+                      best = min(
+                          remaining,
+                          key=lambda x: abs(
+                              x - t
+                          )
+                      )
+
                       chosen.append(best)
                       remaining.remove(best)
-                  boundaries = [0.0] + sorted(chosen) + [duration]
+
+                  boundaries = (
+                      [0.0]
+                      + sorted(chosen)
+                      + [duration]
+                  )
 
               outputs = []
-              for idx in range(expected_parts):
+
+              for idx in range(
+                  expected_parts
+              ):
                   start = boundaries[idx]
                   end = boundaries[idx + 1]
-                  out = f"segments/{prefix}_{idx + 1:02d}.mp3"
-                  clip_duration = max(end - start, 0.20)
+
+                  out = (
+                      f"segments/"
+                      f"{prefix}_"
+                      f"{idx + 1:02d}.mp3"
+                  )
+
+                  clip_duration = max(
+                      end - start,
+                      0.20
+                  )
 
                   subprocess.run([
-                      "ffmpeg", "-y",
-                      "-ss", f"{start:.3f}",
-                      "-i", input_file,
-                      "-t", f"{clip_duration:.3f}",
-                      "-c:a", "libmp3lame", "-b:a", "192k",
-                      "-ar", "48000", "-ac", "2", out
+                      "ffmpeg",
+                      "-y",
+                      "-ss",
+                      f"{start:.3f}",
+                      "-i",
+                      input_file,
+                      "-t",
+                      f"{clip_duration:.3f}",
+                      "-c:a",
+                      "libmp3lame",
+                      "-b:a",
+                      "192k",
+                      "-ar",
+                      "48000",
+                      "-ac",
+                      "2",
+                      out
                   ], check=True)
 
-                  if not os.path.exists(out) or os.path.getsize(out) < 1000:
-                      raise RuntimeError(f"{prefix}: invalid split audio: {out}")
+                  if (
+                      not os.path.exists(out)
+                      or
+                      os.path.getsize(out)
+                      < 1000
+                  ):
+                      raise RuntimeError(
+                          f"Invalid split audio: {out}"
+                      )
 
-                  part_duration = float(subprocess.check_output([
-                      "ffprobe", "-v", "error",
-                      "-show_entries", "format=duration",
-                      "-of", "default=noprint_wrappers=1:nokey=1", out
-                  ]).decode().strip())
+                  part_duration = (
+                      get_audio_duration(out)
+                  )
 
                   if part_duration < 0.20:
                       raise RuntimeError(
-                          f"{prefix}: split audio too short: {out} ({part_duration:.2f}s)"
+                          "Split audio too short: "
+                          f"{out}"
                       )
 
                   print(
-                      f"{prefix}_{idx + 1:02d}: "
-                      f"{start:.2f}s -> {end:.2f}s ({part_duration:.2f}s)"
+                      f"Voice part "
+                      f"{idx + 1}: "
+                      f"{part_duration:.2f}s"
                   )
+
                   outputs.append(out)
 
               return outputs
 
-          def build_fallback_timings(spoken_text, audio_duration):
-              tokens = [t for t in re.split(r"\s+", spoken_text.strip()) if t]
+          def build_fallback_timings(
+              spoken_text,
+              audio_duration
+          ):
+              tokens = [
+                  t
+                  for t in re.split(
+                      r"\s+",
+                      spoken_text.strip()
+                  )
+                  if t
+              ]
+
               if not tokens:
                   return []
-              usable_duration = max(float(audio_duration) - 0.10, 0.20)
+
+              usable_duration = max(
+                  float(audio_duration) - 0.10,
+                  0.20
+              )
+
               weights = []
+
               for token in tokens:
-                  cleaned = re.sub(r"[^\w\u0B80-\u0BFF]", "", token, flags=re.UNICODE)
-                  weights.append(max(len(cleaned), 1))
+                  cleaned = re.sub(
+                      r"[^\w\u0B80-\u0BFF]",
+                      "",
+                      token,
+                      flags=re.UNICODE
+                  )
+
+                  weights.append(
+                      max(
+                          len(cleaned),
+                          1
+                      )
+                  )
+
               total_weight = sum(weights)
               cursor = 0.0
               words = []
-              for index, (token, weight) in enumerate(zip(tokens, weights)):
-                  share = usable_duration * (weight / total_weight)
-                  start = cursor
-                  end = usable_duration if index == len(tokens) - 1 else min(
-                      usable_duration, cursor + max(share, 0.08)
+
+              for index, (
+                  token,
+                  weight
+              ) in enumerate(
+                  zip(tokens, weights)
+              ):
+                  share = (
+                      usable_duration
+                      * (
+                          weight /
+                          total_weight
+                      )
                   )
+
+                  start = cursor
+
+                  if index == len(tokens) - 1:
+                      end = usable_duration
+                  else:
+                      end = min(
+                          usable_duration,
+                          cursor
+                          + max(
+                              share,
+                              0.08
+                          )
+                      )
+
                   if end <= start:
-                      end = min(usable_duration, start + 0.08)
-                  words.append({"text": token.strip(), "start": start, "end": end})
+                      end = min(
+                          usable_duration,
+                          start + 0.08
+                      )
+
+                  words.append({
+                      "text": token.strip(),
+                      "start": start,
+                      "end": end
+                  })
+
                   cursor = end
+
               return words
 
           def ass_time(seconds):
-              hours = int(seconds // 3600)
-              minutes = int((seconds % 3600) // 60)
-              secs = seconds % 60
-              return f"{hours}:{minutes:02d}:{secs:05.2f}"
+              hours = int(
+                  seconds // 3600
+              )
+
+              minutes = int(
+                  (seconds % 3600)
+                  // 60
+              )
+
+              secs = (
+                  seconds % 60
+              )
+
+              return (
+                  f"{hours}:"
+                  f"{minutes:02d}:"
+                  f"{secs:05.2f}"
+              )
 
           def escape_ass(text):
               return (
-                  str(text).replace("\\", r"\\").replace("{", r"\{")
-                  .replace("}", r"\}").replace("\n", " ").strip()
+                  str(text)
+                  .replace(
+                      "\\",
+                      r"\\"
+                  )
+                  .replace(
+                      "{",
+                      r"\{"
+                  )
+                  .replace(
+                      "}",
+                      r"\}"
+                  )
+                  .replace(
+                      "\n",
+                      " "
+                  )
+                  .strip()
               )
 
-          def create_ass(words, output_file):
+          def create_ass(
+              words,
+              output_file
+          ):
               lines = [
-                  "[Script Info]", "ScriptType: v4.00+", "PlayResX: 1080",
-                  "PlayResY: 1920", "WrapStyle: 2", "ScaledBorderAndShadow: yes", "",
+                  "[Script Info]",
+                  "ScriptType: v4.00+",
+                  "PlayResX: 1080",
+                  "PlayResY: 1920",
+                  "WrapStyle: 2",
+                  "ScaledBorderAndShadow: yes",
+                  "",
                   "[V4+ Styles]",
                   "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding",
                   "Style: Default,Noto Sans Tamil,66,&H00FFFFFF,&H00FFFFFF,&H00000000,&H70000000,-1,0,0,0,100,100,0,0,1,5,1,2,65,65,305,1",
-                  "", "[Events]",
+                  "",
+                  "[Events]",
                   "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text",
               ]
+
               chunk_size = 2
-              for index, word in enumerate(words):
-                  group_start = (index // chunk_size) * chunk_size
-                  group_end = min(group_start + chunk_size, len(words))
-                  group = words[group_start:group_end]
+
+              for index, word in enumerate(
+                  words
+              ):
+                  group_start = (
+                      index // chunk_size
+                  ) * chunk_size
+
+                  group_end = min(
+                      group_start
+                      + chunk_size,
+                      len(words)
+                  )
+
+                  group = words[
+                      group_start:
+                      group_end
+                  ]
+
                   display_words = []
-                  for local_index, item in enumerate(group):
-                      actual_index = group_start + local_index
-                      safe_word = escape_ass(item["text"])
+
+                  for local_index, item in enumerate(
+                      group
+                  ):
+                      actual_index = (
+                          group_start
+                          + local_index
+                      )
+
+                      safe_word = escape_ass(
+                          item["text"]
+                      )
+
                       if actual_index == index:
                           display_words.append(
-                              r"{\1c&H0000FF00&\b1}" + safe_word + r"{\1c&H00FFFFFF&\b1}"
+                              r"{\1c&H0000FF00&\b1}"
+                              + safe_word
+                              + r"{\1c&H00FFFFFF&\b1}"
                           )
                       else:
-                          display_words.append(r"{\1c&H00FFFFFF&\b1}" + safe_word)
-                  caption = " ".join(display_words)
-                  start = float(word["start"])
-                  if index + 1 < len(words):
-                      end = max(float(words[index + 1]["start"]), start + 0.08)
-                  else:
-                      end = max(float(word["end"]) + 0.08, start + 0.10)
-                  lines.append(
-                      f"Dialogue: 0,{ass_time(start)},{ass_time(end)},"
-                      f"Default,,0,0,0,,{{\\an2}}{caption}"
+                          display_words.append(
+                              r"{\1c&H00FFFFFF&\b1}"
+                              + safe_word
+                          )
+
+                  caption = " ".join(
+                      display_words
                   )
-              with open(output_file, "w", encoding="utf-8-sig") as f:
-                  f.write("\n".join(lines))
 
-          odd_scenes = [(i, s) for i, s in enumerate(scenes, start=1) if i % 2 == 1]
-          even_scenes = [(i, s) for i, s in enumerate(scenes, start=1) if i % 2 == 0]
+                  start = float(
+                      word["start"]
+                  )
 
-          print("Generating female batch: ONE Gemini request")
+                  if index + 1 < len(words):
+                      end = max(
+                          float(
+                              words[
+                                  index + 1
+                              ]["start"]
+                          ),
+                          start + 0.08
+                      )
+                  else:
+                      end = max(
+                          float(
+                              word["end"]
+                          ) + 0.08,
+                          start + 0.10
+                      )
+
+                  lines.append(
+                      f"Dialogue: 0,"
+                      f"{ass_time(start)},"
+                      f"{ass_time(end)},"
+                      "Default,,0,0,0,,"
+                      f"{{\\an2}}{caption}"
+                  )
+
+              with open(
+                  output_file,
+                  "w",
+                  encoding="utf-8-sig"
+              ) as f:
+                  f.write(
+                      "\n".join(lines)
+                  )
+
+          # ==================================================
+          # ONE GEMINI REQUEST FOR ALL 8 SCENES
+          # ==================================================
+
+          all_scenes = [
+              (i, scene)
+              for i, scene in enumerate(
+                  scenes,
+                  start=1
+              )
+          ]
+
+          print(
+              "Generating ALL 8 Tamil scenes "
+              "with ONE Despina TTS request..."
+          )
+
           gemini_voice_batch(
-              [s.get("voice_text", "") for _, s in odd_scenes],
+              [
+                  scene.get(
+                      "voice_text",
+                      ""
+                  )
+                  for _, scene in all_scenes
+              ],
               "segments/female_batch.mp3",
-              FEMALE_GEMINI_VOICE,
-              "natural, warm, energetic female"
-          )
-          female_parts = split_on_silence(
-              "segments/female_batch.mp3", len(odd_scenes), "female_part"
+              FEMALE_GEMINI_VOICE
           )
 
-          print("Generating male batch: ONE Gemini request")
-          gemini_voice_batch(
-              [s.get("voice_text", "") for _, s in even_scenes],
-              "segments/male_batch.mp3",
-              MALE_GEMINI_VOICE,
-              "natural, warm, energetic male"
+          female_parts = split_on_silence(
+              "segments/female_batch.mp3",
+              len(all_scenes),
+              "female_part"
           )
-          male_parts = split_on_silence(
-              "segments/male_batch.mp3", len(even_scenes), "male_part"
-          )
+
+          if (
+              len(female_parts)
+              != len(all_scenes)
+          ):
+              raise RuntimeError(
+                  "Expected 8 voice parts, "
+                  f"got {len(female_parts)}"
+              )
 
           voice_by_scene = {}
-          for (scene_no, _), path in zip(odd_scenes, female_parts):
-              voice_by_scene[scene_no] = path
-          for (scene_no, _), path in zip(even_scenes, male_parts):
-              voice_by_scene[scene_no] = path
 
-          for i, scene in enumerate(scenes, start=1):
+          for (
+              scene_no,
+              _
+          ), path in zip(
+              all_scenes,
+              female_parts
+          ):
+              voice_by_scene[
+                  scene_no
+              ] = path
+
+          print(
+              "SUCCESS: 8 scene voices "
+              "created from ONE Gemini request"
+          )
+
+          # ==================================================
+          # RENDER 8 VIDEO SCENES
+          # ==================================================
+
+          for i, scene in enumerate(
+              scenes,
+              start=1
+          ):
               number = str(i).zfill(2)
-              video_url = scene.get("video_url")
-              voice_text = normalize_spoken_tamil(scene.get("voice_text", ""))
+
+              video_url = scene.get(
+                  "video_url"
+              )
+
+              voice_text = (
+                  normalize_spoken_tamil(
+                      scene.get(
+                          "voice_text",
+                          ""
+                      )
+                  )
+              )
 
               if not video_url:
-                  raise RuntimeError(f"Scene {i}: video_url missing")
+                  raise RuntimeError(
+                      f"Scene {i}: "
+                      "video_url missing"
+                  )
+
               if not voice_text:
-                  raise RuntimeError(f"Scene {i}: voice_text missing")
+                  raise RuntimeError(
+                      f"Scene {i}: "
+                      "voice_text missing"
+                  )
 
-              source_video = f"segments/source_{number}.mp4"
-              voice_file = voice_by_scene[i]
-              subtitle_file = os.path.abspath(f"segments/subtitle_{number}.ass")
-              output_file = f"segments/scene_{number}.mp4"
+              source_video = (
+                  f"segments/"
+                  f"source_{number}.mp4"
+              )
 
-              print("==========================")
-              print(f"SCENE {i}")
-              print("==========================")
-              print("Downloading clip...")
+              voice_file = (
+                  voice_by_scene[i]
+              )
+
+              subtitle_file = (
+                  os.path.abspath(
+                      f"segments/"
+                      f"subtitle_{number}.ass"
+                  )
+              )
+
+              output_file = (
+                  f"segments/"
+                  f"scene_{number}.mp4"
+              )
+
+              print(
+                  "=========================="
+              )
+
+              print(
+                  f"SCENE {i}"
+              )
+
+              print(
+                  "=========================="
+              )
+
+              print(
+                  "Downloading clip..."
+              )
 
               subprocess.run([
-                  "curl", "-L", "--fail", "--retry", "3",
-                  "--retry-delay", "2", video_url, "-o", source_video
+                  "curl",
+                  "-L",
+                  "--fail",
+                  "--retry",
+                  "3",
+                  "--retry-delay",
+                  "2",
+                  video_url,
+                  "-o",
+                  source_video
               ], check=True)
 
               print(
-                  f"Voice: {FEMALE_GEMINI_VOICE if i % 2 == 1 else MALE_GEMINI_VOICE}"
+                  f"Voice: "
+                  f"{FEMALE_GEMINI_VOICE}"
               )
 
-              duration = float(subprocess.check_output([
-                  "ffprobe", "-v", "error", "-show_entries", "format=duration",
-                  "-of", "default=noprint_wrappers=1:nokey=1", voice_file
-              ]).decode().strip())
+              duration = (
+                  get_audio_duration(
+                      voice_file
+                  )
+              )
 
-              words = build_fallback_timings(voice_text, duration)
+              words = (
+                  build_fallback_timings(
+                      voice_text,
+                      duration
+                  )
+              )
+
               if not words:
-                  raise RuntimeError(f"Scene {i}: could not build Tamil caption timings")
-              create_ass(words, subtitle_file)
+                  raise RuntimeError(
+                      f"Scene {i}: "
+                      "could not build "
+                      "Tamil caption timings"
+                  )
 
-              scene_duration = duration + 0.12
-              print(f"Voice duration: {duration:.2f}s")
+              create_ass(
+                  words,
+                  subtitle_file
+              )
 
-              subtitle_filter = f"subtitles='{subtitle_file}':fontsdir='/usr/share/fonts'"
+              scene_duration = (
+                  duration + 0.12
+              )
+
+              print(
+                  f"Voice duration: "
+                  f"{duration:.2f}s"
+              )
+
+              subtitle_filter = (
+                  f"subtitles="
+                  f"'{subtitle_file}':"
+                  f"fontsdir="
+                  f"'/usr/share/fonts'"
+              )
+
               zoom_filter = (
                   "zoompan="
                   "z='min(zoom+0.0007,1.05)':"
                   "x='iw/2-(iw/zoom/2)':"
                   "y='ih/2-(ih/zoom/2)':"
-                  "d=1:s=1080x1920:fps=30,"
-              )
-              video_filter = (
-                  "scale=1080:1920:force_original_aspect_ratio=increase,"
-                  "crop=1080:1920," + zoom_filter +
-                  "eq=contrast=1.06:saturation=1.10:brightness=0.01,"
-                  + subtitle_filter + ",format=yuv420p"
+                  "d=1:"
+                  "s=1080x1920:"
+                  "fps=30,"
               )
 
-              print("Rendering scene...")
+              video_filter = (
+                  "scale="
+                  "1080:1920:"
+                  "force_original_aspect_ratio="
+                  "increase,"
+                  "crop=1080:1920,"
+                  + zoom_filter
+                  + "eq="
+                  "contrast=1.06:"
+                  "saturation=1.10:"
+                  "brightness=0.01,"
+                  + subtitle_filter
+                  + ",format=yuv420p"
+              )
+
+              print(
+                  "Rendering scene..."
+              )
+
               subprocess.run([
-                  "ffmpeg", "-y",
-                  "-stream_loop", "-1", "-i", source_video,
-                  "-i", voice_file,
-                  "-t", str(scene_duration),
-                  "-vf", video_filter,
-                  "-map", "0:v:0", "-map", "1:a:0",
-                  "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
-                  "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
-                  "-af", "apad=pad_dur=0.12",
-                  "-movflags", "+faststart", output_file
+                  "ffmpeg",
+                  "-y",
+                  "-stream_loop",
+                  "-1",
+                  "-i",
+                  source_video,
+                  "-i",
+                  voice_file,
+                  "-t",
+                  str(scene_duration),
+                  "-vf",
+                  video_filter,
+                  "-map",
+                  "0:v:0",
+                  "-map",
+                  "1:a:0",
+                  "-c:v",
+                  "libx264",
+                  "-preset",
+                  "veryfast",
+                  "-crf",
+                  "22",
+                  "-c:a",
+                  "aac",
+                  "-b:a",
+                  "192k",
+                  "-ar",
+                  "48000",
+                  "-ac",
+                  "2",
+                  "-af",
+                  "apad=pad_dur=0.12",
+                  "-movflags",
+                  "+faststart",
+                  output_file
               ], check=True)
 
-          print("ALL 8 SCENES RENDERED WITH ONLY 2 GEMINI TTS REQUESTS")
+          print(
+              "ALL 8 SCENES RENDERED "
+              "WITH ONLY 1 GEMINI TTS REQUEST"
+          )
           PY
 
       - name: Join scenes with dynamic transitions
@@ -681,7 +1225,9 @@ jobs:
           import shutil
 
           scenes = sorted(
-              glob.glob("segments/scene_*.mp4")
+              glob.glob(
+                  "segments/scene_*.mp4"
+              )
           )
 
           if not scenes:
@@ -694,20 +1240,26 @@ jobs:
                   scenes[0],
                   "final.mp4"
               )
+
               raise SystemExit(0)
 
           durations = []
 
           for scene in scenes:
-              duration = subprocess.check_output([
-                  "ffprobe",
-                  "-v", "error",
-                  "-show_entries",
-                  "format=duration",
-                  "-of",
-                  "default=noprint_wrappers=1:nokey=1",
-                  scene
-              ]).decode().strip()
+              duration = (
+                  subprocess.check_output([
+                      "ffprobe",
+                      "-v",
+                      "error",
+                      "-show_entries",
+                      "format=duration",
+                      "-of",
+                      "default=noprint_wrappers=1:nokey=1",
+                      scene
+                  ])
+                  .decode()
+                  .strip()
+              )
 
               durations.append(
                   float(duration)
@@ -718,20 +1270,18 @@ jobs:
               min(durations) / 3
           )
 
-          print("Scene durations:")
+          print(
+              "Scene durations:"
+          )
 
           for i, duration in enumerate(
               durations,
               start=1
           ):
               print(
-                  f"Scene {i}: {duration:.2f}s"
+                  f"Scene {i}: "
+                  f"{duration:.2f}s"
               )
-
-          print(
-              "Transition duration:",
-              transition_duration
-          )
 
           command = [
               "ffmpeg",
@@ -746,40 +1296,53 @@ jobs:
 
           filters = []
 
-          for i in range(len(scenes)):
+          for i in range(
+              len(scenes)
+          ):
               filters.append(
                   f"[{i}:v]"
-                  f"settb=AVTB,"
-                  f"setpts=PTS-STARTPTS"
+                  "settb=AVTB,"
+                  "setpts=PTS-STARTPTS"
                   f"[v{i}]"
               )
 
               filters.append(
                   f"[{i}:a]"
-                  f"asetpts=PTS-STARTPTS"
+                  "asetpts=PTS-STARTPTS"
                   f"[a{i}]"
               )
 
-          running_duration = durations[0]
+          running_duration = (
+              durations[0]
+          )
 
           video_left = "v0"
           audio_left = "a0"
 
-          for i in range(1, len(scenes)):
-              video_output = f"vx{i}"
-              audio_output = f"ax{i}"
+          for i in range(
+              1,
+              len(scenes)
+          ):
+              video_output = (
+                  f"vx{i}"
+              )
+
+              audio_output = (
+                  f"ax{i}"
+              )
 
               offset = (
-                  running_duration -
-                  transition_duration
+                  running_duration
+                  - transition_duration
               )
 
               filters.append(
                   f"[{video_left}]"
                   f"[v{i}]"
-                  f"xfade="
-                  f"transition=fade:"
-                  f"duration={transition_duration:.3f}:"
+                  "xfade="
+                  "transition=fade:"
+                  f"duration="
+                  f"{transition_duration:.3f}:"
                   f"offset={offset:.3f}"
                   f"[{video_output}]"
               )
@@ -787,21 +1350,27 @@ jobs:
               filters.append(
                   f"[{audio_left}]"
                   f"[a{i}]"
-                  f"acrossfade="
-                  f"d={transition_duration:.3f}:"
-                  f"c1=tri:"
-                  f"c2=tri"
+                  "acrossfade="
+                  f"d="
+                  f"{transition_duration:.3f}:"
+                  "c1=tri:"
+                  "c2=tri"
                   f"[{audio_output}]"
               )
 
               running_duration = (
-                  running_duration +
-                  durations[i] -
-                  transition_duration
+                  running_duration
+                  + durations[i]
+                  - transition_duration
               )
 
-              video_left = video_output
-              audio_left = audio_output
+              video_left = (
+                  video_output
+              )
+
+              audio_left = (
+                  audio_output
+              )
 
           filter_complex = ";".join(
               filters
@@ -810,42 +1379,32 @@ jobs:
           command.extend([
               "-filter_complex",
               filter_complex,
-
               "-map",
               f"[{video_left}]",
-
               "-map",
               f"[{audio_left}]",
-
               "-c:v",
               "libx264",
-
               "-preset",
               "veryfast",
-
               "-crf",
               "22",
-
               "-c:a",
               "aac",
-
               "-b:a",
               "192k",
-
               "-ar",
               "48000",
-
               "-ac",
               "2",
-
               "-movflags",
               "+faststart",
-
               "final.mp4"
           ])
 
           print(
-              "Rendering final video with dynamic transitions..."
+              "Rendering final video "
+              "with transitions..."
           )
 
           subprocess.run(
@@ -867,7 +1426,9 @@ jobs:
 
           MUSIC_URL = "https://cdn.pixabay.com/download/audio/2022/03/15/audio_115b9b04e5.mp3"
 
-          print("Downloading background music...")
+          print(
+              "Downloading background music..."
+          )
 
           try:
               urllib.request.urlretrieve(
@@ -882,25 +1443,33 @@ jobs:
               )
 
               print(
-                  "Keeping video without background music."
+                  "Keeping video without music."
               )
 
               raise SystemExit(0)
 
-          duration = subprocess.check_output([
-              "ffprobe",
-              "-v", "error",
-              "-show_entries",
-              "format=duration",
-              "-of",
-              "default=noprint_wrappers=1:nokey=1",
-              "final.mp4"
-          ]).decode().strip()
+          duration = (
+              subprocess.check_output([
+                  "ffprobe",
+                  "-v",
+                  "error",
+                  "-show_entries",
+                  "format=duration",
+                  "-of",
+                  "default=noprint_wrappers=1:nokey=1",
+                  "final.mp4"
+              ])
+              .decode()
+              .strip()
+          )
 
-          duration = float(duration)
+          duration = float(
+              duration
+          )
 
           print(
-              f"Final video duration: {duration:.2f}s"
+              f"Final video duration: "
+              f"{duration:.2f}s"
           )
 
           filter_complex = (
@@ -936,47 +1505,32 @@ jobs:
           subprocess.run([
               "ffmpeg",
               "-y",
-
               "-i",
               "final.mp4",
-
               "-stream_loop",
               "-1",
-
               "-i",
               "background.mp3",
-
               "-filter_complex",
               filter_complex,
-
               "-map",
               "0:v:0",
-
               "-map",
               "[mixed]",
-
               "-c:v",
               "copy",
-
               "-c:a",
               "aac",
-
               "-b:a",
               "192k",
-
               "-ar",
               "48000",
-
               "-ac",
               "2",
-
               "-shortest",
-
               "-movflags",
               "+faststart",
-
               "final_music.mp4"
-
           ], check=True)
 
           os.replace(
@@ -985,7 +1539,8 @@ jobs:
           )
 
           print(
-              "BACKGROUND MUSIC + VOICE DUCKING READY"
+              "BACKGROUND MUSIC + "
+              "VOICE DUCKING READY"
           )
           PY
 
@@ -1038,7 +1593,7 @@ jobs:
 
       - name: Fix final video compatibility
         run: |
-          echo "Fixing MP4 for mobile, browser and YouTube playback..."
+          echo "Fixing final MP4..."
 
           ffmpeg -y \
             -fflags +genpts \
