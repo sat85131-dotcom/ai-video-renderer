@@ -16,34 +16,28 @@ jobs:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
     steps:
-    
-      - name: Install tools
-        timeout-minutes: 5
+      - name: Check tools
+        timeout-minutes: 2
         run: |
-          echo "Checking required tools..."
+          set -e
+          echo "Checking GitHub runner tools..."
+          command -v ffmpeg
+          command -v ffprobe
+          python3 --version
+          python3 -c "import requests; print('requests', requests.__version__)"
 
-          if ! command -v ffmpeg >/dev/null 2>&1; then
+          if fc-match "Noto Sans Tamil" 2>/dev/null | grep -qi "NotoSansTamil"; then
+            echo "Noto Sans Tamil already available"
+          elif fc-match "Noto Sans Tamil" 2>/dev/null | grep -qi "Noto"; then
+            echo "Compatible Noto Tamil font available"
+          else
+            echo "Tamil font not found; installing only fonts-noto-core..."
             sudo apt-get update -qq
-            sudo apt-get install -y --no-install-recommends ffmpeg
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends fonts-noto-core
           fi
 
-          if ! fc-match "Noto Sans Tamil" | grep -qi "Noto"; then
-            sudo apt-get update -qq
-            sudo apt-get install -y --no-install-recommends fonts-noto-core
-          fi
-
-          python3 - <<'PY'
-          try:
-              import requests
-              print("requests already installed:", requests.__version__)
-          except ImportError:
-              raise SystemExit(1)
-          PY
-
-          ffmpeg -version | head -n 1
-          fc-match "Noto Sans Tamil"
+          fc-match "Noto Sans Tamil" || true
           echo "TOOLS READY"
-          
       - name: Save scenes JSON
         env:
           SCENES_JSON: ${{ inputs.scenes_json }}
