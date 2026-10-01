@@ -16,27 +16,34 @@ jobs:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
     steps:
-      - name: Check tools
-        timeout-minutes: 2
+      - name: Install required tools
+        timeout-minutes: 8
         run: |
-          set -e
-          echo "Checking GitHub runner tools..."
-          command -v ffmpeg
-          command -v ffprobe
-          python3 --version
-          python3 -c "import requests; print('requests', requests.__version__)"
+          echo "Preparing tools..."
 
-          if fc-match "Noto Sans Tamil" 2>/dev/null | grep -qi "NotoSansTamil"; then
-            echo "Noto Sans Tamil already available"
-          elif fc-match "Noto Sans Tamil" 2>/dev/null | grep -qi "Noto"; then
-            echo "Compatible Noto Tamil font available"
-          else
-            echo "Tamil font not found; installing only fonts-noto-core..."
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            echo "FFmpeg missing - installing..."
             sudo apt-get update -qq
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends fonts-noto-core
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ffmpeg
+          else
+            echo "FFmpeg already available"
           fi
 
-          fc-match "Noto Sans Tamil" || true
+          if ! fc-match "Noto Sans Tamil" >/dev/null 2>&1; then
+            echo "Tamil font missing - installing..."
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends fonts-noto-core
+          else
+            echo "Tamil font available"
+          fi
+
+          python3 -c "import requests" 2>/dev/null || python3 -m pip install requests
+
+          echo "===== TOOL CHECK ====="
+          ffmpeg -version | head -n 1
+          ffprobe -version | head -n 1
+          fc-match "Noto Sans Tamil"
+          python3 -c "import requests; print('requests:', requests.__version__)"
           echo "TOOLS READY"
       - name: Save scenes JSON
         env:
