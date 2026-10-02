@@ -29,20 +29,11 @@ jobs:
             echo "FFmpeg already available"
           fi
 
-          if ! fc-match "Noto Sans Tamil" >/dev/null 2>&1; then
-            echo "Tamil font missing - installing..."
-            sudo apt-get update -qq
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends fonts-noto-core
-          else
-            echo "Tamil font available"
-          fi
-
           python3 -c "import requests" 2>/dev/null || python3 -m pip install requests
 
           echo "===== TOOL CHECK ====="
           ffmpeg -version | head -n 1
           ffprobe -version | head -n 1
-          fc-match "Noto Sans Tamil"
           python3 -c "import requests; print('requests:', requests.__version__)"
           echo "TOOLS READY"
       - name: Save scenes JSON
@@ -906,12 +897,6 @@ jobs:
               voice_file = (
                   voice_by_scene[i]
               )
-              subtitle_file = (
-                  os.path.abspath(
-                      f"segments/"
-                      f"subtitle_{number}.ass"
-                  )
-              )
               output_file = (
                   f"segments/"
                   f"scene_{number}.mp4"
@@ -949,34 +934,12 @@ jobs:
                       voice_file
                   )
               )
-              words = (
-                  build_fallback_timings(
-                      voice_text,
-                      duration
-                  )
-              )
-              if not words:
-                  raise RuntimeError(
-                      f"Scene {i}: "
-                      "could not build "
-                      "Tamil caption timings"
-                  )
-              create_ass(
-                  words,
-                  subtitle_file
-              )
               scene_duration = (
                   duration + 0.12
               )
               print(
                   f"Voice duration: "
                   f"{duration:.2f}s"
-              )
-              subtitle_filter = (
-                  f"subtitles="
-                  f"'{subtitle_file}':"
-                  f"fontsdir="
-                  f"'/usr/share/fonts'"
               )
               zoom_filter = (
                   "zoompan="
@@ -998,8 +961,7 @@ jobs:
                   "contrast=1.06:"
                   "saturation=1.10:"
                   "brightness=0.01,"
-                  + subtitle_filter
-                  + ",format=yuv420p"
+                  "format=yuv420p"
               )
               print(
                   "Rendering scene..."
